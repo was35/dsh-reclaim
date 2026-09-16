@@ -1,0 +1,4 @@
+# dsh-reclaim bundle patch layer — mounts this plugin into the profile tree.
+- insert:
+    - id: reclaim
+      name: dsh-reclaim

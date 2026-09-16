@@ -1,0 +1,50 @@
+{
+  "name": "dsh-reclaim",
+  "version": "0.1.0",
+  "description": "Audit DeepSeek Harness disk usage (sessions, attachments, rebuildable caches), classify it by risk, and move anything you choose to delete into the plugin's own recoverable trash. The model can query, never delete.",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "docs/safety.md"
+  ],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "storage",
+    "cleanup",
+    "disk-usage",
+    "audit"
+  ],
+  "license": "MIT",
+  "author": "gankudadiz",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gankudadiz/dsh-reclaim.git"
+  },
+  "bugs": {
+    "url": "https://github.com/gankudadiz/dsh-reclaim/issues"
+  },
+  "homepage": "https://github.com/gankudadiz/dsh-reclaim#readme",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-home-paths": ">=0.1.5-rc.1 <0.2.0-0"
+  }
+}

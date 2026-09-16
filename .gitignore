@@ -3,7 +3,7 @@ node_modules/
 .pnpm-store/
 
 # 注意：不要忽略 lib/ 与 client/
-# 本插件按 D1 用 ESM JavaScript 直接编写（无构建步骤），lib/index.js 就是源码本体；
+# 本插件用 ESM JavaScript 直接编写（无构建步骤），lib/index.js 就是源码本体；
 # 且 DSH 插件必须提交 lib/（参考 dsh-lsp-actions / dsh-easyrewrite / dshmarket
 # 的 package.json files 字段都含 "lib"），否则使用者无法直接安装。
 

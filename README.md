@@ -46,7 +46,6 @@ DSH 官方明确**不回收**附件。`@deepseek-ai/dsh-attachment-local` 的 RE
 
 ## 开发笔记
 
-DSH 插件开发中实测到的陷阱（可复用的坑）见 `docs/engineering-notes.md`（本地文档，不随仓库发布）。
 
 ## 许可
 
