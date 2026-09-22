@@ -22,9 +22,30 @@ DSH 官方明确**不回收**附件。`@deepseek-ai/dsh-attachment-local` 的 RE
 ## 它做什么
 
 - 审计 **会话**、**附件**、**可重建缓存**各自占了多少、还有谁在用
-- 按三档风险分级：**安全**（可批量清理）/ **需确认**（逐个查看）/ **危险**（不可勾选）
+- 按分档规则给风险分级：**安全**（可批量清理）/ **需确认**（逐个查看）/ **危险**（不可清理）/ **未分类**（只报告）
 - 清理**不是删除**：数据搬进插件自带的隔离区，可随时恢复
 - 只读的 Agent 审计工具（模型能查、不能删）
+
+## 安装
+
+装进一个**带 web 层**的 profile（也就是平时用来开界面的那个）：
+
+```sh
+dsh plugin --profile web add dsh-reclaim
+dsh web
+```
+
+装完打开 **设置 → 空间回收**。
+
+> ⚠️ **不要装进一个全新的空 profile。** `dsh plugin --profile <新名字> add <包>` 建出来的 profile 只带 `@deepseek-ai/dsh-base`，里面**没有任何东西提供 web 连接层**，插件会一直停在
+> `pending (waiting for service: connection)`，宿主启动失败。要用自己的 profile 时，让它包含
+> `@deepseek-ai/dsh-web-app`（例如以自带的 `web` 模板为底），再装本插件。
+
+装好后想确认它在服务，可以直接问它：
+
+```sh
+curl -b <会话 cookie> http://127.0.0.1:<端口>/api/dsh-reclaim/health
+```
 
 ## 它凭什么判断
 
