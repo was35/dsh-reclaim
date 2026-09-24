@@ -3,7 +3,7 @@
 > Audit and safely reclaim the disk space DeepSeek Harness keeps forever.
 > 审计并安全回收 DeepSeek Harness 永久占用的磁盘空间。
 
-**DSH 插件。尚未发布，还不可安装。**
+**DSH 插件。功能已完成，尚未发布到 npm——安装方式见下方「安装」。**
 
 ---
 
@@ -28,7 +28,10 @@ DSH 官方明确**不回收**附件。`@deepseek-ai/dsh-attachment-local` 的 RE
 
 ## 安装
 
-装进一个**带 web 层**的 profile（也就是平时用来开界面的那个）：
+功能已经完成并通过验证，但**尚未发布到 npm**，所以 `dsh plugin add dsh-reclaim` 目前还装不到。
+在发布之前，可以本地安装：`npm pack` 生成 tgz → `dsh plugin --profile web add file:<tgz>`。
+
+发布之后，安装就是一条命令——装进一个**带 web 层**的 profile（也就是平时用来开界面的那个）：
 
 ```sh
 dsh plugin --profile web add dsh-reclaim
@@ -57,13 +60,13 @@ curl -b <会话 cookie> http://127.0.0.1:<端口>/api/dsh-reclaim/health
 
 宁可少删，不可删错。
 
-完整的三档判定规则、安全保证与已知边界见 **[docs/safety.md](docs/safety.md)**。
+完整的**分档判定规则**、安全保证与已知边界见 **[docs/safety.md](docs/safety.md)**。
 
 ## 不做的事
 
 不清理日志 / 临时文件 / 备份目录；不管理 `profiles/` 下的插件依赖；不做定时自动清理；不允许模型替用户删数据；不支持远端 / 共享存储后端。
 
-> ⚠️ 本项目**还没有实现**，上面的规则是它要满足的设计契约（可审计的目标），不是已经跑起来的功能。
+> 上面这些规则**已经实现并在真实数据上验证过**：所有破坏性操作都要人在界面上明确确认，Agent 侧只有只读工具。判定规则、安全保证与已知边界见 **[docs/safety.md](docs/safety.md)**。
 
 ## 许可
 
