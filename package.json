@@ -34,9 +34,11 @@
   },
   "homepage": "https://github.com/gankudadiz/dsh-reclaim#readme",
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=20.0.0",
+    "dsh": ">=0.1.5-rc.1 <0.2.0"
   },
   "dsh": {
+    "manifestVersion": 1,
     "bundle": {
       "patch": "./cordis.patch.yml"
     },
@@ -45,6 +47,6 @@
     }
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh-home-paths": ">=0.1.5-rc.1 <0.2.0-0"
+    "@deepseek-ai/dsh-home-paths": ">=0.1.5-rc.1 <0.2.0"
   }
 }
