@@ -28,15 +28,15 @@ DSH 官方明确**不回收**附件。`@deepseek-ai/dsh-attachment-local` 的 RE
 
 ## 安装
 
-功能已经完成并通过验证，但**尚未发布到 npm**，所以 `dsh plugin add dsh-reclaim` 目前还装不到。
-在发布之前，可以本地安装：`npm pack` 生成 tgz → `dsh plugin --profile web add file:<tgz>`。
-
-发布之后，安装就是一条命令——装进一个**带 web 层**的 profile（也就是平时用来开界面的那个）：
+装进一个**带 web 层**的 profile（也就是平时用来开界面的那个）：
 
 ```sh
-dsh plugin --profile web add dsh-reclaim
+# 从 GitHub 安装（尚未发布到 npm）
+dsh plugin --profile web add "git+https://github.com/gankudadiz/dsh-reclaim.git#main"
 dsh web
 ```
+
+也可以下载本仓库 Release 里附带的预构建包，用 `file:<路径>` 安装——省去 clone 与依赖安装。
 
 装完打开 **设置 → 空间回收**。
 
@@ -49,6 +49,9 @@ dsh web
 ```sh
 curl -b <会话 cookie> http://127.0.0.1:<端口>/api/dsh-reclaim/health
 ```
+
+> 已发布到 npm 时会多一条更短的路径：`dsh plugin --profile web add dsh-reclaim`。**尚未发布**，
+> 所以上面那条 `git+https://` 才是当前可用的方式。
 
 ## 支持的 DSH 版本
 

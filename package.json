@@ -21,7 +21,9 @@
     "storage",
     "cleanup",
     "disk-usage",
-    "audit"
+    "disk-space",
+    "audit",
+    "quarantine"
   ],
   "license": "MIT",
   "author": "gankudadiz",
@@ -48,5 +50,10 @@
   },
   "peerDependencies": {
     "@deepseek-ai/dsh-home-paths": ">=0.1.5-rc.1 <0.2.0 || >=0.1.6-0 <0.1.7-0 || >=0.1.7-0 <0.1.8-0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-home-paths": {
+      "optional": true
+    }
   }
 }
