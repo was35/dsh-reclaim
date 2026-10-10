@@ -73,6 +73,35 @@ function graphWithEdges(edges) {
   }
 }
 
+/**
+ * A graph that *built* (`ok: true`) but could not prove every session's
+ * references were read.
+ *
+ * This is the shape `buildReferenceGraph` returns when a session's log is
+ * truncated or its reader throws: the scan does not fail, it reports the gap in
+ * `coverage.unknownSessions` and pauses orphan detection
+ * (`orphanDetermination.allowed: false`). An edge belonging to an unread session
+ * is simply absent from `sessionEdges`, so a caller that only looks at `ok` reads
+ * that absence as "nobody references it".
+ */
+function graphWithUnprovenSessions(unknownSessions, edges = []) {
+  const graph = graphWithEdges(edges)
+  const total = unknownSessions.length + 1
+  graph.coverage = {
+    proven: 1,
+    unknown: unknownSessions.length,
+    total,
+    unknownSessions,
+    provenRatio: 1 / total,
+  }
+  graph.orphanDetermination = {
+    allowed: false,
+    reason: `attachment relations could not be proven complete for ${unknownSessions.length} of ${total} session(s); orphan detection is PAUSED for the whole scan rather than silently under-counting`,
+    unknownSessions,
+  }
+  return graph
+}
+
 test('planSessionDelete refuses a session that another session references', async () => {
   const { dir, layout } = homeWithSession()
   try {
@@ -163,6 +192,51 @@ test('deleteSession refuses a referenced session and moves nothing', async () =>
     assert.equal(existsSync(dir), true)
     assert.equal(readdirSync(dir).includes('session.v1.jsonl'), true)
     // Nothing was carried into the quarantine either.
+    assert.equal(existsSync(join(layout.trash.root)), false)
+  } finally {
+    rmSync(layout.home, { recursive: true, force: true })
+  }
+})
+
+test('a graph that could not be proven complete refuses the delete', async () => {
+  const { dir, layout } = homeWithSession()
+  try {
+    // `ok` is true — the scan ran and returned a report. But REFERRER's log could
+    // not be read, so its edge to TARGET is missing from `sessionEdges`. The
+    // graph already knows it could not prove completeness and says so in
+    // `coverage.unknownSessions`; a caller that reads only `ok` turns that gap
+    // into "nobody references TARGET" and authorises the move.
+    const plan = await planSessionDelete(ctxWithoutLiveSessions(), {
+      layout,
+      sessionId: TARGET,
+      referenceGraph: graphWithUnprovenSessions([REFERRER]),
+    })
+
+    assert.equal(plan.ok, false)
+    assert.ok(
+      plan.blockers.some((entry) => entry.code === 'reference-graph-incomplete'),
+      `expected a reference-graph-incomplete blocker; blockers were ${JSON.stringify(plan.blockers.map((entry) => entry.code))}`,
+    )
+    assert.equal(existsSync(dir), true)
+  } finally {
+    rmSync(layout.home, { recursive: true, force: true })
+  }
+})
+
+test('deleteSession refuses a partially readable graph and moves nothing', async () => {
+  const { dir, layout } = homeWithSession()
+  try {
+    const result = await deleteSession(ctxWithoutLiveSessions(), {
+      layout,
+      sessionId: TARGET,
+      dryRun: false,
+      referenceGraph: graphWithUnprovenSessions([REFERRER]),
+    })
+
+    assert.equal(result.ok, false)
+    assert.equal(result.move, null)
+    assert.match(result.reason, /reference-graph-incomplete/)
+    assert.equal(existsSync(dir), true)
     assert.equal(existsSync(join(layout.trash.root)), false)
   } finally {
     rmSync(layout.home, { recursive: true, force: true })
