@@ -62,13 +62,13 @@ echo "== host loop: dsh $("$DSH_BIN" --version 2>/dev/null || echo '?')  home=$V
 rm -rf "$VERIFY_HOME" "$BOOT_LOG" "$COOKIE_JAR"
 export DSH_HOME="$VERIFY_HOME"
 
-echo "-- 1/4 init the '$PROFILE' profile"
+echo "-- 1/5 init the '$PROFILE' profile"
 "$DSH_BIN" --profile "$PROFILE" --dump-config >/dev/null 2>&1
 
-echo "-- 2/4 install the plugin from this working tree"
+echo "-- 2/5 install the plugin from this working tree"
 "$DSH_BIN" plugin --profile "$PROFILE" add "file:$REPO_ROOT" >/dev/null 2>&1
 
-echo "-- 3/4 boot"
+echo "-- 3/5 boot"
 "$DSH_BIN" --profile "$PROFILE" --port "$PORT" --no-open >"$BOOT_LOG" 2>&1 &
 HOST_PID=$!
 
@@ -96,7 +96,7 @@ if grep -q "did not activate" "$BOOT_LOG"; then
   exit 1
 fi
 
-echo "-- 4/4 probe /health"
+echo "-- 4/5 probe /health"
 curl -sS -c "$COOKIE_JAR" -L -o /dev/null "http://127.0.0.1:$PORT/?token=$TOKEN"
 curl -sS -b "$COOKIE_JAR" "http://127.0.0.1:$PORT/api/dsh-reclaim/health" -o "$VERIFY_HOME.health.json"
 
@@ -154,6 +154,9 @@ node -e '
 ' "$VERIFY_HOME.health.json"
 
 echo "PASS: the plugin mounted on the real host and every capability it needs is present."
+
+echo "-- 5/5 clear a rebuildable cache family and restore it"
+node "$REPO_ROOT/scripts/verify-clear.mjs" --port "$PORT" --jar "$COOKIE_JAR"
 
 cleanup
 HOST_PID=
