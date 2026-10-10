@@ -4,6 +4,11 @@
   "description": "Audit DeepSeek Harness disk usage (sessions, attachments, rebuildable caches), classify it by risk, and move anything you choose to delete into the plugin's own recoverable trash. The model can query, never delete.",
   "type": "module",
   "main": "lib/index.js",
+  "scripts": {
+    "test": "node --import ./test/hooks/register.mjs --test test/",
+    "test:host": "sh scripts/verify-host.sh",
+    "test:all": "npm test && npm run test:host"
+  },
   "exports": {
     ".": "./lib/index.js",
     "./client": "./lib/client.js",
