@@ -1,6 +1,6 @@
 {
   "name": "@was35/dsh-reclaim",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Audit DeepSeek Harness disk usage (sessions, attachments, rebuildable caches), classify it by risk, and move anything you choose to delete into the plugin's own recoverable trash. The model can query, never delete.",
   "type": "module",
   "main": "lib/index.js",
