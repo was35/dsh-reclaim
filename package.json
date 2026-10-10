@@ -7,6 +7,7 @@
   "scripts": {
     "test": "node --import ./test/hooks/register.mjs --test test/",
     "test:host": "sh scripts/verify-host.sh",
+    "test:desktop": "sh scripts/verify-desktop.sh",
     "test:all": "npm test && npm run test:host"
   },
   "exports": {

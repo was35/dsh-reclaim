@@ -23,6 +23,12 @@
 #   KEEP_HOME=1 sh scripts/verify-host.sh # keep it (reusable for other plugins)
 #   VERIFY_HOME=/path PORT=19400 sh scripts/verify-host.sh
 #
+# A custom PROFILE name needs a TEMPLATE, because the host only knows how to
+# create the profiles it ships. `web` and `desktop` are shipped and must NOT be
+# given a template (the host rejects that outright: "profile ... is shipped and
+# cannot be a custom profile target"); any other name must say what to clone:
+#   TEMPLATE=web PROFILE=desktop-clone sh scripts/verify-host.sh
+#
 set -eu
 
 REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -30,6 +36,7 @@ DSH_BIN=${DSH_BIN:-/usr/local/bin/dsh}
 PORT=${PORT:-19399}
 VERIFY_HOME=${VERIFY_HOME:-/tmp/dsh-reclaim-verify}
 PROFILE=${PROFILE:-web}
+TEMPLATE=${TEMPLATE:-}
 KEEP_HOME=${KEEP_HOME:-0}
 
 # The one guard that matters: never operate on the real home.
@@ -62,8 +69,22 @@ echo "== host loop: dsh $("$DSH_BIN" --version 2>/dev/null || echo '?')  home=$V
 rm -rf "$VERIFY_HOME" "$BOOT_LOG" "$COOKIE_JAR"
 export DSH_HOME="$VERIFY_HOME"
 
-echo "-- 1/5 init the '$PROFILE' profile"
-"$DSH_BIN" --profile "$PROFILE" --dump-config >/dev/null 2>&1
+echo "-- 1/5 init the '$PROFILE' profile${TEMPLATE:+ from the '$TEMPLATE' template}"
+if [ -n "$TEMPLATE" ]; then
+  "$DSH_BIN" --profile "$PROFILE" --from-default-profile "$TEMPLATE" --dump-config >/dev/null 2>&1 || {
+    echo "FATAL: could not create profile '$PROFILE' from template '$TEMPLATE'." >&2
+    echo "       Shipped profiles are 'web' and 'desktop'; is '$TEMPLATE' one of them?" >&2
+    exit 2
+  }
+else
+  "$DSH_BIN" --profile "$PROFILE" --dump-config >/dev/null 2>&1 || {
+    echo "FATAL: profile '$PROFILE' does not exist, and no TEMPLATE was given." >&2
+    echo "       'web' and 'desktop' are shipped and need none; any other name must" >&2
+    echo "       say what to clone:" >&2
+    echo "         TEMPLATE=web PROFILE=$PROFILE sh scripts/verify-host.sh" >&2
+    exit 2
+  }
+fi
 
 echo "-- 2/5 install the plugin from this working tree"
 "$DSH_BIN" plugin --profile "$PROFILE" add "file:$REPO_ROOT" >/dev/null 2>&1
@@ -122,8 +143,12 @@ node -e '
   const images = (payload.families ?? []).find((family) => family.id === "request-images")
   console.log("   capabilities  : " + capabilities.checks.length + " present, 0 missing")
   console.log("   request-images: " + (images?.layout?.selected ?? "?") + " → " + (images?.path ?? "?"))
-  console.log("   dshCachePath  : exported=" + (images?.layout?.dshCachePathExported ?? "?") +
-              " anomaly=" + (images?.layout?.anomaly ?? "?"))
+  // Printed precisely: `?? "?"` renders both `null` and a missing key as "?",
+  // which reads like "unknown" on a line that is asserting they are known.
+  console.log("   dshCachePath  : exported=" + String(images?.layout?.dshCachePathExported) +
+              " anomaly=" + (images?.layout === undefined || !("anomaly" in images.layout)
+                ? "(absent)"
+                : JSON.stringify(images.layout.anomaly)))
 
   // The layout values above used to be printed and never checked, which made
   // this loop pass while showing a regressed value: `ok` and `capabilities` are
