@@ -75,3 +75,18 @@ test('POST /delete refuses rather than 500s when the reference graph cannot be r
     rmSync(home, { recursive: true, force: true })
   }
 })
+
+test('POST /delete refuses a traversal sessionId with 400 Bad Request', async () => {
+  const { ctx, handlers } = recordingHost()
+  registerRoutes(ctx, {})
+
+  const handler = handlers.get('/api/dsh-reclaim/delete')
+  const response = await handler({
+    text: async () => JSON.stringify({ sessionId: '../traversal-id', confirm: true }),
+  })
+  const body = await response.json()
+
+  assert.equal(response.status, 400)
+  assert.equal(body.ok, false)
+  assert.match(body.error, /path traversal/)
+})

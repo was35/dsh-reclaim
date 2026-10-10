@@ -242,3 +242,41 @@ test('deleteSession refuses a partially readable graph and moves nothing', async
     rmSync(layout.home, { recursive: true, force: true })
   }
 })
+
+test('planSessionDelete refuses a sessionId containing path traversal or invalid characters', async () => {
+  const { dir, layout } = homeWithSession()
+  try {
+    const plan = await planSessionDelete(ctxWithoutLiveSessions(), {
+      layout,
+      sessionId: `../--workspace--/session-${TARGET}`,
+    })
+
+    assert.equal(plan.ok, false)
+    assert.ok(
+      plan.blockers.some((entry) => entry.code === 'invalid-session-id'),
+      `expected invalid-session-id blocker; blockers were ${JSON.stringify(plan.blockers.map((b) => b.code))}`,
+    )
+    assert.equal(existsSync(dir), true)
+  } finally {
+    rmSync(layout.home, { recursive: true, force: true })
+  }
+})
+
+test('deleteSession refuses an invalid sessionId and moves nothing', async () => {
+  const { dir, layout } = homeWithSession()
+  try {
+    const result = await deleteSession(ctxWithoutLiveSessions(), {
+      layout,
+      sessionId: 'invalid/traversal/id',
+      dryRun: false,
+    })
+
+    assert.equal(result.ok, false)
+    assert.equal(result.move, null)
+    assert.match(result.reason, /invalid-session-id/)
+    assert.equal(existsSync(dir), true)
+    assert.equal(existsSync(join(layout.trash.root)), false)
+  } finally {
+    rmSync(layout.home, { recursive: true, force: true })
+  }
+})
