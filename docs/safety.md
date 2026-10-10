@@ -55,7 +55,7 @@ else if (failed.length > 0) tier = 'confirm'
 逐项机制：
 
 - **活态是一票否决的闸门。** `livenessBlocks = !context.sessionsServiceAvailable || DANGEROUS_LIVENESS.includes(liveness.state)`（`lib/classify.js:155`），而 `DANGEROUS_LIVENESS = ['running','idle-live','unknown']`（`lib/classify.js:66`）——注意 **`unknown` 也在内**：读不到活态既不算活着也不算死了，一律不许清。四个活态取值在 `lib/liveness.js:42`；`running` 是「Agent 正在跑一个回合」，不是存活测试（`lib/liveness.js:1-31`）；两个探针互相矛盾时返回 `unknown` 而不是二选一（`lib/liveness.js:170-186` 附近，reason `probes-disagree`）。
-- **被引用即危险。** `referencing = (context.referencingSessionIds ?? []).filter(other => other !== id)`，非空即记一条失败（`lib/classify.js:176-182`），自环被过滤掉。
+- **被引用即危险。** `referencing = (context.referencingSessionIds ?? []).filter(other => other !== id)`，非空即记一条失败（`lib/classify.js:176-182`），自环被过滤掉。**这条判据现在不只是界面语汇**：`POST /delete` 用同一条规则在服务端复核并拒绝（`buildReferencingIndex` / `referencingSessionIdsOf`，`lib/graph.js:53-68`），见 §4.4 与 §8.5。
 - **是外面的父 → 需确认。** `childrenOutsideBatch` 非空即记 `parent-of-outside-session`（`lib/classify.js:186-193`）。
 - **归档三态，不是布尔。** `session.archived === true` 通过；`null/undefined` 记 `archived-unknown`；否则记 `not-archived`（`lib/classify.js:205-210`）。语义在消息里写死：「归档状态未知（归档集合读不到），不能当成‘未归档’，也不能当成‘已归档’」（`lib/classify.js:79`）。**归档集合在注册表全局，不在 workspace 实体上**；从实体读会得到 `undefined`，当成 `[]` 就会给出「没有任何东西被归档」这种危险方向的错误答案（`lib/sessions.js:130-143`、`lib/sessions.js:403-404`）。
 - **年龄未知 ≠ 很老 ≠ 0。** `activityMs = lastActivity ?? createdAt`，`activitySource` 记来源；`ageDays` 为 `null` 时记 `age-unknown`，只有 `activityMs <= cutoff` 才算 `older-than-threshold`（`lib/classify.js:212-221`）。`ageInDays` 对非有限时间戳返回 `null` 而非 0（`lib/config.js:162-165`），阈值算术是 `nowMs - thresholdDays * 86400000`（`lib/config.js:148-150`）。
@@ -223,7 +223,7 @@ README 的说法是：**引用关系只认结构化字段，不在日志文本�
 
 - 只被本批候选引用的附件 → 变成 cascade，**降为 `confirm`**，不偷偷扫走；
 - 候选与保留会话共享的对象 → `freedByDeletingBytes = 0`，一个字节都不算释放；
-- 批次总量由**对象**算出，不是把逐行归因相加（`lib/recompute.js:200-206`）——表头 `totalReclaimableBytes` 是互不相交来源桶之和（`lib/classification-report.js:432-440`），按行求和会把共享对象按持有者重复计数。
+- 批次总量由**对象**算出，不是把逐行归因相加（`lib/recompute.js:203` 附近）——表头 `totalReclaimableBytes` 是互不相交来源桶之和（`lib/classification-report.js:434-436`、`lib/classification-report.js:518-525`），按行求和会把共享对象按持有者重复计数。
 
 ### 3.5 计数纪律
 
@@ -279,16 +279,24 @@ BATCH_SUBDIRS = { session: 'sessions', 'session-cache': 'session-caches',
 
 ### 4.4 单条删除的前置检查——以及它**不**检查什么
 
-`planSessionDelete`（`lib/delete-session.js:217-300`）只产生两类 blocker：
+`planSessionDelete`（`lib/delete-session.js:281-395`）产生四类 blocker：
 
-1. 活态 **不是** `not-live`（`unknown` 的理由是「活态无法判定，故不得移动」，`lib/delete-session.js:230-243`）；
-2. 会话目录找不到（`session-dir-not-found`）。
+1. 活态 **不是** `not-live`（`unknown` 的理由是「活态无法判定，故不得移动」）；
+2. **引用关系读不出来**（`reference-graph-unavailable`）；
+3. **有别的会话引用了它**（`referenced-by-other-session`，`detail.referencingSessionIds` 列出是谁）；
+4. 会话目录找不到（`session-dir-not-found`）。
 
-`deleteSession` 再额外拒绝「仍拥有后台任务」的会话，并把任务列出来而不是静默放弃（`lib/delete-session.js:316`、`lib/delete-session.js:335-343`）。blocker 非空时**在任何东西移动之前**拒绝（`lib/delete-session.js:331-334`）。
+`deleteSession` 再额外拒绝「仍拥有后台任务」的会话，并把任务列出来而不是静默放弃。blocker 非空时**在任何东西移动之前**拒绝。
 
-> **未记录的行为：单条删除路径不检查档位、不检查引用、不检查归档、不检查阈值。**
+> **单条删除仍然不检查档位、不检查归档、不检查阈值——但「引用完整性」现在是 API 层的硬约束了。**
 >
-> 「危险不可清理」是**在判定与界面层**实现的（`selectable: false` + `lib/client.js:683` 的禁用复选框），**HTTP 的 `POST /delete` 并不复核这些**：一个带 `{"sessionId": …}` 的请求会把一个 `danger` 档、正被别的会话 `@session` 引用的会话搬进隔离区，只要它当前不是活着的。这不是数据丢失（隔离区可还原），但它意味着引用完整性在 API 层不是硬性约束，只有活态与后台任务是。
+> 第 2、3 条 blocker 是后补的。此前档位计算会把「被别的会话引用」判成 `danger` 并禁用界面复选框（`lib/classify.js:250-253`、`lib/client.js:674-690`），而 `POST /delete` 收一个 `sessionId` 加一个 `confirm` 就搬东西：**一个手写的请求就能把一个仍被引用的会话搬进隔离区**。这不是数据丢失（隔离区可还原），但引用完整性当时只在界面层成立。
+>
+> 现在这条关系与活态一样，在决定的当下现读（`readReferences`，`lib/delete-session.js:234-273`），默认自己建图、调用方有现成的才覆盖。判档与拒绝共用同一条规则（`buildReferencingIndex` / `referencingSessionIdsOf`，`lib/graph.js`），因为两者必须永远一致：不一致时无人报警，而最坏方向的不一致正是「界面禁勾的会话被服务端放行」。
+>
+> **读不出来 ≠ 没人引用。** 图不可读时拒绝，而不是读成空图——这是 §2 那条硬规则在单条删除上的同一条纪律。
+>
+> 「档位」（`danger` / `confirm` / `safe`）本身仍然只是「界面不提供入口」的意思，不是 API 拒绝的理由。现在拒绝的理由是它背后那两条**事实**——活态与引用——而这两条服务端都自己复核了。`body.risk` 是调用方自述，不授权任何事，只作为证据记录（`lib/routes.js:639-701`）。
 
 ### 4.5 manifest
 
@@ -372,9 +380,40 @@ BATCH_SUBDIRS = { session: 'sessions', 'session-cache': 'session-caches',
 ### 5.4 「确认」在界面上的实际形态
 
 - 批量清：勾选 `safe` 行 → 按钮文案「清理所选 N 项（进隔离区，可恢复）」+ 注「只会搬进插件自带的隔离区，不会销毁任何东西」（`lib/messages.js:43-145` 对应键，`lib/client.js:625`）；
-- 需确认档：无复选框，「仍要清理…」展开后列出阻塞条件与家族规模，按钮「确认清理这一族」；家族整族一起动（`lib/client.js:755-790`、`lib/client.js:1088-1094`）；
+- 需确认档：无复选框，「仍要清理…」展开后列出阻塞条件与家族规模，按钮「确认清理这一族」；家族整族一起动（`lib/client.js:755-790`、`lib/client.js:1081-1095`）；
 - 危险档：复选框禁用（`lib/client.js:674-690`）；
 - 永久删除：**唯一使用浏览器原生 `window.confirm` 的地方**，先报「N 项 · X」再问，标题「彻底清空（不可恢复）」，正文「将永久删除 N 项、X。这不进回收站，无法撤销。」（`lib/client.js:1121-1126`、`lib/client.js:1421-1424`）。而且 `POST /purge` 会在缺少 `confirm` 时把 `wouldDestroy` 一并返回，界面据此显示数字（`lib/routes.js:619-637`）。
+
+### 5.5 这些保证是怎么被验证的
+
+上面每一条原本只能靠读代码得出——上游仓库里没有测试。本仓库补上了两层闭环，结论现在可以自己跑一遍：
+
+| 命令 | 层次 | 它证明什么 |
+|---|---|---|
+| `npm test` | 单元，`node:test`，**零依赖** | 被测试钉住的那几条行为 |
+| `npm run test:host` | 真宿主在环 | 插件真的挂得上，且宿主具备它声明的每一项能力 |
+| `npm run test:all` | 两层 | 先单元、后宿主 |
+
+**为什么闭环要先修一个别的东西。** `lib/` 里唯一的裸 import 是 `@deepseek-ai/dsh-home-paths`（`lib/paths.js:32`），它只存在于宿主的 asar 内，所以在宿主体外**一个模块都加载不了**：
+
+```
+ERR_MODULE_NOT_FOUND: Cannot find package '@deepseek-ai/dsh-home-paths'
+        imported from .../dsh-reclaim/lib/paths.js
+```
+
+`test/hooks/` 用一个解析钩子把这**一个** specifier 映到测试替身（`test/hooks/peer-double.mjs`），生产代码一行不改。替身只实现被消费的三个导出，并且**故意不导出 `dshCachePath`**——让默认布局是确定的，而不是取决于替身恰好定义了什么。要测新布局的用例走代码里已有的注入点 `detectRequestImagesLayout(home, homePathsNs)`（`lib/paths.js:109`，其 JSDoc 自称 "injectable so tests can pin the feature detection"）。
+
+**宿主那一层刻意不用替身。** 它证明的是宿主真的接受这份 manifest 与 patch，这是替身永远证不了的。脚本还显式断言 stderr 里没有 `did not activate`——**宿主带着一个挂掉的插件条目也能正常启动**，不断言这一条就会假绿。
+
+`scripts/verify-host.sh` 自带一道拒绝真实 home 的守卫：
+
+```sh
+case "$VERIFY_HOME" in
+  "$REAL_HOME"|"$REAL_HOME"/*) echo "REFUSING: …"; exit 2 ;;
+esac
+```
+
+默认在 `/tmp/dsh-reclaim-verify` 下建一个一次性 `web` profile、跑完 `rm -rf`；`KEEP_HOME=1` 保留它，那个 profile 可以继续用来验别的插件。它**不碰** `desktop` profile。
 
 ---
 
@@ -455,17 +494,23 @@ BATCH_SUBDIRS = { session: 'sessions', 'session-cache': 'session-caches',
 
 ### 7.4 版本支持
 
-`engines.dsh` 与 `peerDependencies` 逐字相同，逐 minor 串 OR 子句（`package.json`）：
+`engines.dsh` 与 `peerDependencies` 逐字相同（`package.json`）：
 
 ```
->=0.1.5-rc.1 <0.2.0 || >=0.1.6-0 <0.1.7-0 || >=0.1.7-0 <0.1.8-0
+>=0.1.5-rc.1 <0.2.0-0 || >=0.2.0-rc.1 <0.3.0-0
 ```
 
-每组都**止于下一个 minor**——写成 `<0.2.0` 会悄悄囊括还没验证过的 `0.1.8+`。README 自述 `0.1.6-*` 是**推断、未实测**；能实测的判据是依赖层真的换了（该版本是否导出 `dshCachePath`），而这台机器上的构建没有这个导出，所以签名不可观测（`lib/paths.js:125-127`）。
+**这条声明在本仓库被改过。** 原来是 `>=0.1.5-rc.1 <0.2.0 || >=0.1.6-0 <0.1.7-0 || >=0.1.7-0 <0.1.8-0`：后两段与第一段完全冗余，而 `<0.2.0` 按字面把 0.2.0 整条线排除在外。它之所以还能装上 `0.2.0-rc.2`，是因为宿主用 `semver.satisfies(version, range, { includePrerelease: true })` 判兼容，而 `0.2.0-rc.2 < 0.2.0` 为真——**靠一个排序巧合放行，声明本身是错的**。顺带说明：这份声明没有任何东西在强制它，宿主自己的包文档写着 "Compatibility is declarative. Current installers and loaders do not enforce dsh.manifestVersion or engines.dsh."
+
+用 `<0.2.0-0` 而不是 `<0.2.0`：prerelease 排序里数字标识符低于字母标识符，所以 `0.2.0-0 < 0.2.0-rc.2`，前一段干净地停在 0.2.0 线之前，由后一段接管整个 0.2.x。
+
+**实测过的是 `0.1.7-rc.1`（上游自述）与 `0.2.0-rc.2`（本仓库，`npm run test:host`）；`0.1.6-*` 仍是推断。** 旧版本那条判据——「该版本是否导出 `dshCachePath`」——现在有答案了：**0.2.0-rc.2 导出它**，`/health` 报 `dshCachePathExported: true`。早先「这台机器的构建没有这个导出」是 app.asar 对普通 shell 不可见造成的**测量假象**。
 
 ---
 
 ## 八、代码与 README 的出入
+
+这一节记录**代码与 README 说法不一致**的地方。其中 **8.5 与 8.6 已在本仓库修复**，条目保留是为了留下修复的判据与代价；其余各条仍然成立。
 
 ### 8.1 `/health` 报告的路径与 README 写的不同
 
@@ -492,37 +537,69 @@ README 说分四级。代码里除 `TIERS` 四个值之外还有：
 
 README 的「它做什么」只说「清理**不是删除**，搬进隔离区可恢复」。但代码里有完整的永久删除通路：`lib/purge.js`、`POST /api/dsh-reclaim/purge`（`lib/routes.js:619-637`）以及界面上的「彻底清空这一批」／原生确认框「彻底清空（不可恢复）」（`lib/client.js:1121-1126`、`lib/client.js:1421-1426`）。README 说的「所有破坏性操作都要人在界面上明确确认」涵盖了它，但**「存在一个不可恢复的操作」这件事本身没有出现在 README 里**。这是本文档存在的主要理由之一。
 
-### 8.5 「危险（不可清理）」只在界面层成立
+### 8.5 「危险（不可清理）」只在界面层成立 —— **已修复**
 
-档位计算给出 `selectable: false`（`lib/classify.js:250-253`），界面把复选框禁用（`lib/client.js:674-690`）——**但 `POST /delete` 不复核档位、引用、归档或阈值**，`planSessionDelete` 的 blocker 只有活态与「目录找不到」（`lib/delete-session.js:230-243`），`deleteSession` 另加后台任务（`lib/delete-session.js:316`）。准确表述：**「危险」是一个「界面不提供清理入口」的档，不是一个「API 拒绝执行」的档。** 后果被隔离区兜住（可还原），但它与「引用完整性是硬约束」的直觉不符。
+**原状。** 档位计算给出 `selectable: false`（`lib/classify.js:250-253`），界面把复选框禁用（`lib/client.js:674-690`），但 `POST /delete` 不复核档位、引用、归档或阈值：`planSessionDelete` 的 blocker 只有活态与「目录找不到」。所以「危险」当时是一个「界面不提供清理入口」的档，**不是**一个「API 拒绝执行」的档。
 
-### 8.6 代码自己的实现与自己的注释/类型契约不一致
+**实质的洞只有一支。** `tier === 'danger'` 的判据是 `livenessBlocks || referencing.length > 0`。活态已经被 blocker 覆盖了，所以真正没人复核的是**引用**：一个被别的会话引用的会话，可以凭一个手写的 `{"sessionId": …, "confirm": true}` 被搬走。
 
-`makeIsInsideTrash` 返回的是 **async 函数**（`Promise<boolean>`，`lib/paths.js:346`），而两处调用点用同步的 `=== true` 比较：
+**现在。** 引用关系与活态一样在决定的当下现读（`readReferences`，`lib/delete-session.js:234-273`），两条新 blocker 是 `reference-graph-unavailable` 与 `referenced-by-other-session`。判档与拒绝共用同一条规则（`buildReferencingIndex` / `referencingSessionIdsOf`，`lib/graph.js:53-68`），从 `lib/classification-report.js` 里抽出来收成一处——两者必须永远一致，不一致时无人报警，而最坏方向的不一致正是「界面禁勾的会话被服务端放行」。
 
-- `lib/trash.js:244`（`planMove` 的 `already-in-trash` 守卫）：`options.isInsideTrash(sourcePath) === true`——与 Promise 比较永远为假，所以**这个守卫在默认路径下从不触发**；
-- `lib/restore.js:89`（`planRestore` 的 `target-inside-trash` 守卫）：同样的写法；而且 `POST /restore` 根本没传 `isInsideTrash`（`lib/routes.js:607-616`），所以这个守卫是双重失效的。
+`POST /delete`（`lib/routes.js:639-701`）把界面判过档的**同一代缓存事实**里的图传下去，一批删除只付一次扫描；扫描失败**不返回 500**，而是什么都不传、让下游 fail-closed 拒绝——500 说的是「再试一次」，这里要说的必须是「别做」。
 
-**安全影响有限但不为零**：`lib/attachments.js:197` 是**正确 `await`** 的，所以「隔离区被排除在扫描之外」这条真正要紧的保证不受影响。失效的是两条纵深防御：移动时不会识别「源已在隔离区内」，还原时不会拒绝「原路径落在隔离区内」。要修的话，把这两处改成 `await`（或让 `makeIsInsideTrash` 提供一个同步变体）即可——注意 `planMove`/`planRestore` 目前是同步函数，改造会波及调用方。
+**代价，说清楚。** 一条删除现在多付一次引用图读取（缓存命中时为零）；图读不出来的部署里，删除会从「照做」变成「拒绝」，这是有意的方向。**档位本身仍然不授权也不拒绝任何事**——`danger` / `confirm` / `safe` 依旧是界面语汇，服务端认的是它背后的事实。`body.risk` 是调用方自述，只记录不授权。
+
+修复前的红证据（测试先于实现写下）：
+
+```
+✖ planSessionDelete refuses a session that another session references
+    a session another session references must not be planned for a move; blockers were []
+✖ deleteSession refuses a referenced session and moves nothing
+    true !== false          ← ok:true，会话真的被搬走了
+```
+
+### 8.6 代码自己的实现与自己的注释/类型契约不一致 —— **已修复**
+
+**原状（双重失效）——下面几处行号是修复前的位置。** `makeIsInsideTrash` 返回的是 **async 函数**（`Promise<boolean>`，`lib/paths.js:329-367`），而两处调用点拿 Promise 去和 `true` 比较，永远为假：
+
+- `lib/trash.js:244`（`planMove` 的 `already-in-trash` 守卫）；
+- `lib/restore.js:89`（`planRestore` 的 `target-inside-trash` 守卫）。
+
+而且两处都还带一个 `options.isInsideTrash !== undefined` 前缀，**两个 HTTP 调用方一个都不传**（`lib/routes.js:590`、`:614`）——所以即使把比较修对，守卫照样不触发。`lib/restore.js:57` 的 JSDoc 还把参数类型声明成同步的 `(path: string) => boolean`，**正是这个错误类型让错误写法看起来是对的**。
+
+**安全影响有限但不为零。** `lib/attachments.js:197` 是正确 `await` 的，所以「隔离区被排除在扫描之外」这条真正要紧的保证不受影响。失效的是两条纵深防御：移动时不会识别「源已在隔离区内」，还原时不会拒绝「原路径落在隔离区内」。第三条测试证明这不是理论风险：
+
+```
+✖ restoreBatch refuses to restore into the quarantine when the caller injects no predicate
+    nothing may be restored into the quarantine / 1 !== 0
+```
+
+`restoreBatch` 在调用方不传谓词时，**真的把隔离区里的内容恢复回了原路径**。
+
+**现在。** `planMove`、`planRestore`、`restoreBatch` 全部改为 `async` 并 `await` 谓词；`planRestore` 内新增默认绑定 `options.isInsideTrash ?? makeIsInsideTrash(options.layout ?? resolveLayout())`，守卫是 `if ((await isInsideTrash(target)) === true)`。默认绑定放在 `planRestore` 而不是各调用方，是为了让预览（`/trash/plan`）与执行（`/restore`）说同一件事——**一个与自己预览的操作不符的预览，比没有预览更糟**。`DELETE` 早就有同样的默认（`lib/trash.js:697`），这里只是把同一纪律搬到恢复侧。`lib/restore.js:57` 的类型已改为 `(path: string) => Promise<boolean>|boolean`。修复后的位置：`planMove` 在 `lib/trash.js:246`，`planRestore` 在 `lib/restore.js:71`，`restoreBatch` 在 `lib/restore.js:151`，路由侧的 `await` 在 `lib/routes.js:590` 与 `lib/routes.js:614`。
+
+**代价。** 三个规划函数从同步变异步，波及它们的所有调用方。备选的「加一个同步版 canonicalizer」被否掉了：那会让同一份判断有两份实现，而这份文档存在的理由之一就是两份实现会悄悄分叉。
 
 ### 8.7 `deleteSessionItems` 的注释与代码有一处小出入
 
-注释说「if **nothing** moved, no manifest is written and the batch directory is removed again」（`lib/trash.js:670-672`）。代码里 `moveable.length === 0` 的早退发生在 `mkdirSync(batchDir, …)` **之前**（`lib/trash.js:751-773` 早退，`mkdirSync` 在其后）——所以不是「建了再删」，而是**根本不建**。行为更干净，注释略旧。
+注释说「if **nothing** moved, no manifest is written and the batch directory is removed again」（`lib/trash.js:677-679`）。代码里 `moveable.length === 0` 的早退发生在 `mkdirSync(batchDir, …)` **之前**（`lib/trash.js:763-780` 早退，`mkdirSync` 在 `lib/trash.js:787`）——所以不是「建了再删」，而是**根本不建**。行为更干净，注释略旧。
+
+（顺带一个容易看错的点：`lib/trash.js:618` 也有一处 `mkdirSync(batchDir, …)`，但那在另一个函数 `createBatch` 里，与本条无关。）
 
 ### 8.8 分级与实际可执行能力之间有一处错位（本次最重要的发现）
 
 **在发布出去的这份代码里，唯一能被执行的动作是把会话目录（及其投影缓存）搬进隔离区。** 依据：
 
-- `deleteSessionItems` 只有一个调用者，就是 `deleteSession`（`lib/delete-session.js:350`）；
-- 它拿到的条目只有两种 `kind`：`'session'`（`lib/delete-session.js:258`）与 `'session-cache'`（`lib/delete-session.js:272`）；
+- `deleteSessionItems` 只有一个调用者，就是 `deleteSession`（`lib/delete-session.js:448`）；
+- 它拿到的条目只有两种 `kind`：`'session'`（`lib/delete-session.js:350`）与 `'session-cache'`（`lib/delete-session.js:364`）；
 - `lib/trash.js:65-71` 定义了 `attachment` / `cache` / `other` 三个子目录与对应 kind，`lib/manifest.js:306-315` 也为它们定义了映射，但**全库没有任何地方产生这三种 kind 的条目**（`grep` 结果只有 `classify.js` 里作为「行种类」的 `kind: 'attachment'` / `kind: 'cache'`，那是报告行的种类，不是待搬条目）；
-- 唯一接受「要删什么」的路由是 `POST /delete`，参数只有 `sessionId`（`lib/routes.js:639-670`），没有接受附件 id 或缓存路径的路由；
-- 界面只渲染 `report.tiers.sessions`（`lib/client.js:431`），检查框、批量清与「仍要清理…」三条通路最终都落到 `POST /delete` + `sessionId`（`lib/client.js:1028-1035`、`lib/client.js:1088-1094`）。
+- 唯一接受「要删什么」的路由是 `POST /delete`，参数只有 `sessionId`（`lib/routes.js:639-701`），没有接受附件 id 或缓存路径的路由；
+- 界面只渲染 `report.tiers.sessions`（`lib/client.js:431`），检查框、批量清与「仍要清理…」三条通路最终都落到 `POST /delete` + `sessionId`（`lib/client.js:1028-1035`、`lib/client.js:1081-1095`）。
 
 因此：
 
-- **附件行、缓存族行、孤儿投影缓存行都会被算出来、被分档、被标 `selectable` / `batchClearable`，但没有任何通路能把它们搬走。** 若真有客户端照 `selectable` 去发 `POST /delete`，会话目录找不到会让整次删除以 `session-dir-not-found` 被拒（`lib/delete-session.js:253-262`），什么都不会发生——安全，但功能不存在。
-- **`totalReclaimableBytes` 把 `cacheBytes` 与 `alreadyOrphanAttachmentBytes` 也算进去了**（`lib/classification-report.js:432-440`）。其中 `alreadyOrphanAttachmentBytes` 在实践中恒为 0（引用图里的每个附件条目都至少带一个引用它的会话，`lib/graph.js:135-141`，所以「零引用且 safe」的行不会出现）；而 `cacheBytes` 可以非零，**但这些字节目前没有任何操作会去释放**。也就是说，界面上那个「可释放」数字**会高估这份代码实际能做到的事**，只有会话日志那部分是可达的。更贴近现实的是另一个字段 `secondPassBatchFreedBytes`（本次批次实际释放多少，`lib/recompute.js:200-206`）。
+- **附件行、缓存族行、孤儿投影缓存行都会被算出来、被分档、被标 `selectable` / `batchClearable`，但没有任何通路能把它们搬走。** 若真有客户端照 `selectable` 去发 `POST /delete`，会话目录找不到会让整次删除以 `session-dir-not-found` 被拒（`lib/delete-session.js:358`），什么都不会发生——安全，但功能不存在。
+- **`totalReclaimableBytes` 把 `cacheBytes` 与 `alreadyOrphanAttachmentBytes` 也算进去了**（`lib/classification-report.js:434-436`、`lib/classification-report.js:518-525`）。其中 `alreadyOrphanAttachmentBytes` 在实践中恒为 0（引用图里的每个附件条目都至少带一个引用它的会话，`lib/graph.js:174-177`，所以「零引用且 safe」的行不会出现）；而 `cacheBytes` 可以非零，**但这些字节目前没有任何操作会去释放**。也就是说，界面上那个「可释放」数字**会高估这份代码实际能做到的事**，只有会话日志那部分是可达的。更贴近现实的是另一个字段 `secondPassBatchFreedBytes`（本次批次实际释放多少，`lib/recompute.js:203` 附近）。
 
 这一条我按代码逐处核对过；如果上游的私库里有额外的写入通路（例如另一个包的 CLI），那它不在本仓库内。
 
@@ -531,9 +608,10 @@ README 的「它做什么」只说「清理**不是删除**，搬进隔离区可
 ## 九、本文无法从代码确定的事项
 
 1. **上游私库里的 `docs/safety.md` 写了什么。** 本仓库是 fork，上游把文档搬进私有仓库；本文完全从这份源码重建，与原文档的措辞、结构不保证一致。
-2. **`@deepseek-ai/dsh-home-paths` 的 `dshCachePath` 真实签名。** 这台机器的构建上该导出不存在（`lib/paths.js:120`、`lib/paths.js:125-127`），代码只能防御性地试两种调用形状。「哪一种才是宿主真正支持的」无法从本仓库确定。
-3. **宿主 `0.1.6-*` 的实际行为。** README 自述是推断、未实测；版本表里只有 `0.1.5-rc.1/2/3` 与 `0.1.7-rc.1` 标为已验证。
+2. **`@deepseek-ai/dsh-home-paths` 的 `dshCachePath` 真实签名。** 该导出在 `0.2.0-rc.2` 上**确实存在**（`/health` 报 `dshCachePathExported: true`，`layout.selected: 'cache'`，路径解析正确，`anomaly: null`），所以「这个版本有没有它」不再是未知。但代码是防御性地试两种调用形状的（`lib/paths.js:120`、`lib/paths.js:125-127`），**哪一种才是宿主真正支持的**仍然看不出来——两种都能得出正确路径时，从外部无法分辨。
+3. **宿主 `0.1.6-*` 的实际行为。** README 自述是推断、未实测；实测过的版本是 `0.1.5-rc.1/2/3`、`0.1.7-rc.1`（上游）与 `0.2.0-rc.2`（本仓库）。
 4. **界面（`lib/client.js`，1672 行）的完整交互。** 我只读了与安全有关的路径：三档控件渲染、批量清、家族复核、还原、永久删除的原生确认框。其余界面行为（视图切换、折叠、状态刷新）未审阅，可能还有与安全相关的细节。
 5. **`purge` 之后隔离区根目录是否总被清掉。** 代码意图明确（`pruneEmptyDirs(pruneFrom, {keepRoot:false})`，`lib/purge.js:123-131`），但「清空后根目录一定消失」依赖文件系统在那一刻允许 `rmdir`；`ENOENT`/`ENOTEMPTY` 都不算失败（`lib/restore.js:283-311`），所以根可能合法地留下。我没有在真机跑清空来确认。
-6. **附件/缓存清理通路是否「尚未实现」还是「已被移除」。** 我只能确定**这份代码里不存在**（§8.8）；git 历史是否显示过它，我没有查。
+6. **附件/缓存清理通路是「尚未实现」还是「已被移除」。** 这一条现在有答案了：`git log -S "attachment: 'attachments'" -- lib/trash.js` 只命中引入搬运原语的那一个提交（`d41600f`「feat: 隔离区搬运、清单、恢复与彻底清空」），`git log --all -S "kind: 'attachment'"` 与 `-S "attachmentId:"` **零命中**。三个子目录是跟着搬运原语一起、**作为预留结构引入的，从未有过生产者**。所以是尚未实现，不是被移除。
 7. **`sessionIds` 之外的记账残留会不会影响宿主的其他行为。** 删掉已归档会话会在注册表全局的归档集合里留下 id（`lib/workspace-sync.js:11-15`），代码报为 `dangling`；宿主之外还有什么组件会读那个集合，本仓库看不出来。
+8. **`desktop` profile 上的真机行为。** 所有实测都在一个一次性 `web` profile 里做的（`scripts/verify-host.sh`）。`desktop` profile 由 Electron 独占，只有带 `manageDesktopProfile: true` 标记的 CLI 能管它，所以本文没有在活着的桌面 profile 上跑过任何一次清理。桌面端与 web 端在这个插件的依赖面上应该没有差别（它只用 `ctx.effect`、`ctx.connection.fetch.register`、`ctx.get` 与四个服务），但**这是推断，不是实测**。隔离区归属判定与路径解析都按 `$DSH_HOME` 走，与 profile 种类无关。
