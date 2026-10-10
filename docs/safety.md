@@ -405,6 +405,10 @@ ERR_MODULE_NOT_FOUND: Cannot find package '@deepseek-ai/dsh-home-paths'
 
 **宿主那一层刻意不用替身。** 它证明的是宿主真的接受这份 manifest 与 patch，这是替身永远证不了的。脚本还显式断言 stderr 里没有 `did not activate`——**宿主带着一个挂掉的插件条目也能正常启动**，不断言这一条就会假绿。
 
+**这一层原本只打印、不断言，等于把最该守的那几个值看成了装饰。** `ok` 与 `capabilities` 由后端能力探测产生，**路径解析出错不会让它们变红**，所以布局回归可以在这一层一路绿着过去。现在 `scripts/verify-host.sh` 对 `families[request-images].layout` 下三条值取等号断言：`selected === "cache"`、`dshCachePathExported === true`、`anomaly === null`（脚本自建全新 home，无历史残留，所以可以取等号而不是「非空」）。这三条**只有在这一层才验得到**——单元那层把 `@deepseek-ai/dsh-home-paths` 换成了替身，真包的契约它证不了。
+
+**替身还有一处覆盖不到的地方，说清楚。** 宿主那层只打 `/health`，而 `/health` 走的路径是 `resolveLayout`（`lib/paths.js:291`，只把 `trash.root` 拼成字符串），**不会调用 `canonicalizeWatchPath`**——它要到 `makeIsInsideTrash` 内才惰性调用（`lib/paths.js:337`、`lib/paths.js:351`）。也就是说 §8.6 修复所依赖的那个函数，**真包上的契约两层闭环都还没验过**；验它需要一次真的移动或还原。这属于 §9 的未决事项。
+
 `scripts/verify-host.sh` 自带一道拒绝真实 home 的守卫：
 
 ```sh
@@ -497,12 +501,22 @@ esac
 `engines.dsh` 与 `peerDependencies` 逐字相同（`package.json`）：
 
 ```
->=0.1.5-rc.1 <0.2.0-0 || >=0.2.0-rc.1 <0.3.0-0
+>=0.1.5-rc.1 <0.3.0-0 || >=0.1.6-0 <0.1.7-0 || >=0.1.7-0 <0.1.8-0 || >=0.2.0-rc.1 <0.3.0-0
 ```
 
-**这条声明在本仓库被改过。** 原来是 `>=0.1.5-rc.1 <0.2.0 || >=0.1.6-0 <0.1.7-0 || >=0.1.7-0 <0.1.8-0`：后两段与第一段完全冗余，而 `<0.2.0` 按字面把 0.2.0 整条线排除在外。它之所以还能装上 `0.2.0-rc.2`，是因为宿主用 `semver.satisfies(version, range, { includePrerelease: true })` 判兼容，而 `0.2.0-rc.2 < 0.2.0` 为真——**靠一个排序巧合放行，声明本身是错的**。顺带说明：这份声明没有任何东西在强制它，宿主自己的包文档写着 "Compatibility is declarative. Current installers and loaders do not enforce dsh.manifestVersion or engines.dsh."
+**这条声明在本仓库被改过两次，第二次是修第一次的错。**
 
-用 `<0.2.0-0` 而不是 `<0.2.0`：prerelease 排序里数字标识符低于字母标识符，所以 `0.2.0-0 < 0.2.0-rc.2`，前一段干净地停在 0.2.0 线之前，由后一段接管整个 0.2.x。
+原来的一版是 `>=0.1.5-rc.1 <0.2.0 || >=0.1.6-0 <0.1.7-0 || >=0.1.7-0 <0.1.8-0`：`<0.2.0` 按字面把 0.2.0 整条线排除在外，它之所以还能装上 `0.2.0-rc.2`，是因为宿主用 `semver.satisfies(version, range, { includePrerelease: true })` 判兼容，而 `0.2.0-rc.2 < 0.2.0` 为真——**靠一个排序巧合放行，声明本身是错的**。
+
+第一次修改把它换成了 `>=0.1.5-rc.1 <0.2.0-0 || >=0.2.0-rc.1 <0.3.0-0`，并顺手断言「后两段与第一段完全冗余」。**这个断言是假的，而且换出来的范围是一次回归**：`<0.2.0-0` 排掉的不只是 `0.2.0` 线，还包括 `0.1.6-0`、`0.1.6-rc.1`、`0.1.7-0`、`0.1.7-rc.1`——在**默认语义**下（也就是任何人拿 `semver.satisfies(v, range)` 或某个不传 `includePrerelease` 的消费者来问的时候）这四版全部落空，而 `0.1.7-rc.1` 正是 README 版本表里列为「已验证」的那一版。原范围之所以收得住它们，靠的恰恰是那两段被删掉的 `>=0.1.6-0 <0.1.7-0` 与 `>=0.1.7-0 <0.1.8-0`，它们并不冗余。
+
+现在的范围把两段显式补回来，并保留一条对 0.2.x 的兜底：默认语义下与原始范围在整条 0.1.x 线上逐格一致，另加 `0.2.0-rc.1` / `0.2.0-rc.2` / 整个 `0.2.x`；拒收 `0.2.0-0`、`0.3.0-rc.1`、`0.3.0`、`1.0.0`。唯一一处与原始范围仍然不同的是 `0.1.8-rc.1`（两边都不收），故不构成回归。
+
+用 `<0.2.0-0` 而不是 `<0.2.0`：prerelease 排序里数字标识符低于字母标识符，所以 `0.2.0-0 < 0.2.0-rc.2`，`<0.3.0-0` 同理把 `0.3.0` 线整个挡在外面。
+
+顺带说明：这份声明没有任何东西在强制它，宿主自己的包文档写着 "Compatibility is declarative. Current installers and loaders do not enforce dsh.manifestVersion or engines.dsh."
+
+**实测过的是 `0.1.7-rc.1`（上游自述）与 `0.2.0-rc.2`（本仓库，`npm run test:host`）；`0.1.6-*` 仍是推断。** 旧版本那条判据——「该版本是否导出 `dshCachePath`」——现在有答案了：**0.2.0-rc.2 导出它**，`/health` 报 `dshCachePathExported: true`。早先「这台机器的构建没有这个导出」是 app.asar 对普通 shell 不可见造成的**测量假象**。
 
 **实测过的是 `0.1.7-rc.1`（上游自述）与 `0.2.0-rc.2`（本仓库，`npm run test:host`）；`0.1.6-*` 仍是推断。** 旧版本那条判据——「该版本是否导出 `dshCachePath`」——现在有答案了：**0.2.0-rc.2 导出它**，`/health` 报 `dshCachePathExported: true`。早先「这台机器的构建没有这个导出」是 app.asar 对普通 shell 不可见造成的**测量假象**。
 
@@ -543,9 +557,13 @@ README 的「它做什么」只说「清理**不是删除**，搬进隔离区可
 
 **实质的洞只有一支。** `tier === 'danger'` 的判据是 `livenessBlocks || referencing.length > 0`。活态已经被 blocker 覆盖了，所以真正没人复核的是**引用**：一个被别的会话引用的会话，可以凭一个手写的 `{"sessionId": …, "confirm": true}` 被搬走。
 
-**现在。** 引用关系与活态一样在决定的当下现读（`readReferences`，`lib/delete-session.js:234-273`），两条新 blocker 是 `reference-graph-unavailable` 与 `referenced-by-other-session`。判档与拒绝共用同一条规则（`buildReferencingIndex` / `referencingSessionIdsOf`，`lib/graph.js:53-68`），从 `lib/classification-report.js` 里抽出来收成一处——两者必须永远一致，不一致时无人报警，而最坏方向的不一致正是「界面禁勾的会话被服务端放行」。
+**现在。** 引用关系与活态一样在决定的当下现读（`readReferences`，`lib/delete-session.js:276`），三条新 blocker 是 `reference-graph-unavailable`、`reference-graph-incomplete` 与 `referenced-by-other-session`。判档与拒绝共用同一条规则（`buildReferencingIndex` / `referencingSessionIdsOf`，`lib/graph.js:53-72`），从 `lib/classification-report.js` 里抽出来收成一处——两者必须永远一致，不一致时无人报警，而最坏方向的不一致正是「界面禁勾的会话被服务端放行」。
 
-`POST /delete`（`lib/routes.js:639-701`）把界面判过档的**同一代缓存事实**里的图传下去，一批删除只付一次扫描；扫描失败**不返回 500**，而是什么都不传、让下游 fail-closed 拒绝——500 说的是「再试一次」，这里要说的必须是「别做」。
+**这里曾经失败开放，是 review 抓出来的第二处洞。** 第一版修复只检查了 `graph.ok`，而 `buildReferenceGraph` 有两种失败形态：整张图读不出来时它给 `ok: false`，但**只读出一半时它给 `ok: true`**——`coverage.unknownSessions` 非空、`orphanDetermination.allowed` 为 `false`（`lib/graph.js:251`）。于是「有 1 个会话的关系没证出来」被读成了「没有别的会话引用它」，删除照做。判据因此收紧成一个具名谓词 `referencesProvenComplete(graph)`（`lib/graph.js:98`），成立条件是 `graph.ok === true && graph.orphanDetermination.allowed === true`；`readReferences` 里 `ok` 的含义也随之从「已建成」改成「**已证明**」。选 `orphanDetermination.allowed` 是因为它是两种失败模式下都正确的唯一字段（`unavailable()` 路径给 `false`、unknown 非空给 `false`、只有完全证成才给 `true`），而且 `lib/classification-report.js:163` 本来就拿它给孤儿档做闸门——这个谓词存在的目的是让两个读者一致，不是提供第二种意见。
+
+两条 blocker 的**顺序是有意的：具体压过笼统**。在一张不完整的图上，「图没证完」与「确实有别的会话引用它」可以同时为真，而后者能指名道姓（`detail.referencingSessionIds`）让人去查，所以 `referenced-by-other-session` 排在前面。
+
+`POST /delete`（`lib/routes.js:674-695`）把界面判过档的**同一代缓存事实**里的图传下去，一批删除只付一次扫描；扫描失败**不返回 500**，而是 fail-closed 拒绝——500 说的是「再试一次」，这里要说的必须是「别做」。`catch` 也不吞原因（`lib/routes.js:686-695`）：它交回一个图形状的 `{ ok: false, reason }` 而不是 `null`，这样操作员看到的是**这里真正发生的那个故障**，而不是下游重建图时撞上的第二个。不新增选项、不再扫第二遍，原因字符串就地拼。
 
 **代价，说清楚。** 一条删除现在多付一次引用图读取（缓存命中时为零）；图读不出来的部署里，删除会从「照做」变成「拒绝」，这是有意的方向。**档位本身仍然不授权也不拒绝任何事**——`danger` / `confirm` / `safe` 依旧是界面语汇，服务端认的是它背后的事实。`body.risk` 是调用方自述，只记录不授权。
 
@@ -576,7 +594,9 @@ README 的「它做什么」只说「清理**不是删除**，搬进隔离区可
 
 `restoreBatch` 在调用方不传谓词时，**真的把隔离区里的内容恢复回了原路径**。
 
-**现在。** `planMove`、`planRestore`、`restoreBatch` 全部改为 `async` 并 `await` 谓词；`planRestore` 内新增默认绑定 `options.isInsideTrash ?? makeIsInsideTrash(options.layout ?? resolveLayout())`，守卫是 `if ((await isInsideTrash(target)) === true)`。默认绑定放在 `planRestore` 而不是各调用方，是为了让预览（`/trash/plan`）与执行（`/restore`）说同一件事——**一个与自己预览的操作不符的预览，比没有预览更糟**。`DELETE` 早就有同样的默认（`lib/trash.js:697`），这里只是把同一纪律搬到恢复侧。`lib/restore.js:57` 的类型已改为 `(path: string) => Promise<boolean>|boolean`。修复后的位置：`planMove` 在 `lib/trash.js:246`，`planRestore` 在 `lib/restore.js:71`，`restoreBatch` 在 `lib/restore.js:151`，路由侧的 `await` 在 `lib/routes.js:590` 与 `lib/routes.js:614`。
+**现在。** `planMove`、`planRestore`、`restoreBatch` 全部改为 `async` 并 `await` 谓词；`planRestore` 内新增默认绑定 `options.isInsideTrash ?? makeIsInsideTrash(options.layout ?? resolveLayout())`，守卫是 `if ((await isInsideTrash(target)) === true)`。默认绑定放在 `planRestore` 而不是各调用方，是为了让预览（`/trash/plan`）与执行（`/restore`）说同一件事——**一个与自己预览的操作不符的预览，比没有预览更糟**。修复后的位置：`planMove` 在 `lib/trash.js:246`，`planRestore` 在 `lib/restore.js:71`，`restoreBatch` 在 `lib/restore.js:151`，路由侧的 `await` 在 `lib/routes.js:590` 与 `lib/routes.js:614`。`lib/restore.js:57` 的参数类型也从同步的 `(path: string) => boolean` 改为 `(path: string) => Promise<boolean>|boolean`——**正是那个错误类型让错误写法看起来是对的**。
+
+**那个 `!== undefined` 前缀后来也被拆掉了。** 修 async 比较时，`planMove` 保留了 `options.isInsideTrash !== undefined && …` 的形状，而 `planRestore` 改成了自绑默认值——同一个仓库里两个孪生函数用两种纪律。前缀的含义是「调用方没给谓词」等于「不设防」，**这正是这个守卫当初能一直是死代码的原因**。现在 `planMove` 也自绑默认值（`lib/trash.js:262`，导入加了 `resolveLayout`），与 `deleteSessionItems` 里已有的整批绑定（`lib/trash.js:706`）同形。本仓库内没有实际行为变化——`deleteSessionItems` 本来就为整批绑一个谓词传下去——改的是这个形状本身：**不传谓词不再等于不设防**。
 
 **代价。** 三个规划函数从同步变异步，波及它们的所有调用方。备选的「加一个同步版 canonicalizer」被否掉了：那会让同一份判断有两份实现，而这份文档存在的理由之一就是两份实现会悄悄分叉。
 
@@ -615,3 +635,4 @@ README 的「它做什么」只说「清理**不是删除**，搬进隔离区可
 6. **附件/缓存清理通路是「尚未实现」还是「已被移除」。** 这一条现在有答案了：`git log -S "attachment: 'attachments'" -- lib/trash.js` 只命中引入搬运原语的那一个提交（`d41600f`「feat: 隔离区搬运、清单、恢复与彻底清空」），`git log --all -S "kind: 'attachment'"` 与 `-S "attachmentId:"` **零命中**。三个子目录是跟着搬运原语一起、**作为预留结构引入的，从未有过生产者**。所以是尚未实现，不是被移除。
 7. **`sessionIds` 之外的记账残留会不会影响宿主的其他行为。** 删掉已归档会话会在注册表全局的归档集合里留下 id（`lib/workspace-sync.js:11-15`），代码报为 `dangling`；宿主之外还有什么组件会读那个集合，本仓库看不出来。
 8. **`desktop` profile 上的真机行为。** 所有实测都在一个一次性 `web` profile 里做的（`scripts/verify-host.sh`）。`desktop` profile 由 Electron 独占，只有带 `manageDesktopProfile: true` 标记的 CLI 能管它，所以本文没有在活着的桌面 profile 上跑过任何一次清理。桌面端与 web 端在这个插件的依赖面上应该没有差别（它只用 `ctx.effect`、`ctx.connection.fetch.register`、`ctx.get` 与四个服务），但**这是推断，不是实测**。隔离区归属判定与路径解析都按 `$DSH_HOME` 走，与 profile 种类无关。
+9. **`canonicalizeWatchPath` 在真包上的契约没有被任何一层闭环验过。** 两层闭环都只走到 `/health`，而 `/health` 经 `resolveLayout`（`lib/paths.js:291`）只拼 `trash.root` 字符串，不会调用它；它只在 `makeIsInsideTrash` 内部被惰性调用（`lib/paths.js:337`、`lib/paths.js:351`），也就是**只有在真的移动或还原时才会执行**。单元那层把它换成了替身（`test/hooks/peer-double.mjs`），宿主那层根本没触发它。§8.6 修复所依赖的正是这个函数：它的返回值形状（是否 `Promise`）、它对不存在的路径与符号链接的处理，目前都只有上游代码自己的说法。要补上这一条，需要在隔离 home 里跑一次真实的移动＋还原并断言结果。
