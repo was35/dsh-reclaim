@@ -394,7 +394,8 @@ BATCH_SUBDIRS = { session: 'sessions', 'session-cache': 'session-caches',
 |---|---|---|
 | `npm test` | 单元，`node:test`，**零依赖** | 被测试钉住的那几条行为 |
 | `npm run test:host` | 真宿主在环 | 插件真的挂得上，且宿主具备它声明的每一项能力 |
-| `npm run test:all` | 两层 | 先单元、后宿主 |
+| `npm run test:desktop` | 真宿主在环 + 对活 desktop profile 的只读断言 | 宿主闭环那一整套，外加「桌面端不需要专门适配」（§9 第 8 条） |
+| `npm run test:all` | 前两层 | 先单元、后宿主。**不含** `test:desktop`——它要求这台机器装了桌面端 |
 
 **为什么闭环要先修一个别的东西。** `lib/` 里唯一的裸 import 是 `@deepseek-ai/dsh-home-paths`（`lib/paths.js:32`），它只存在于宿主的 asar 内，所以在宿主体外**一个模块都加载不了**：
 
@@ -420,6 +421,8 @@ esac
 ```
 
 默认在 `/tmp/dsh-reclaim-verify` 下建一个一次性 `web` profile、跑完 `rm -rf`；`KEEP_HOME=1` 保留它，那个 profile 可以继续用来验别的插件。它**不碰** `desktop` profile。
+
+**桌面端那一层（`scripts/verify-desktop.sh`）。** 它存在的理由很具体：`--profile desktop` **根本无法从命令行启动**，所以「在真 desktop profile 上跑一遍」这件事做不到，而在活着的那个上跑又会抢它写死的 19387 端口、并把插件装进用户真正在用的 profile。于是它改为四步——①只读扫描活 desktop profile **自己合成出来的** `cordis.yml`，断言本插件要的五个服务全部由那两个官方 bundle 提供，并断言 `dsh-desktop-host` **不是** profile 成员（哪天成了成员，这个脚本就不再是忠实的检查，直接 FAIL）；②断言 `lib/*.js` 里除 `DSH_HOME` 外不读任何环境变量、也不提 `DSH_PROFILE` / `profileContext`（多出一个就 FAIL——那会是一个可能在两端不同的新输入，必须单独验）；③在一个从 `web` 模板克隆的一次性 home 里（`desktop-clone`，端口 19400）跑完整闭环，也就是把②③两条**做出来**而不只是读出来；④前后各取活 desktop profile 三个文件的 `shasum -a 256` 并比对，**这就是「没有污染全局环境」的断言**。它自带与 `verify-host.sh` 同款的拒绝真实 home 的守卫，并默认保留 home 供复用。详见 §9 第 8 条。
 
 ---
 
@@ -517,8 +520,6 @@ esac
 用 `<0.2.0-0` 而不是 `<0.2.0`：prerelease 排序里数字标识符低于字母标识符，所以 `0.2.0-0 < 0.2.0-rc.2`，`<0.3.0-0` 同理把 `0.3.0` 线整个挡在外面。
 
 顺带说明：这份声明没有任何东西在强制它，宿主自己的包文档写着 "Compatibility is declarative. Current installers and loaders do not enforce dsh.manifestVersion or engines.dsh."
-
-**实测过的是 `0.1.7-rc.1`（上游自述）与 `0.2.0-rc.2`（本仓库，`npm run test:host`）；`0.1.6-*` 仍是推断。** 旧版本那条判据——「该版本是否导出 `dshCachePath`」——现在有答案了：**0.2.0-rc.2 导出它**，`/health` 报 `dshCachePathExported: true`。早先「这台机器的构建没有这个导出」是 app.asar 对普通 shell 不可见造成的**测量假象**。
 
 **实测过的是 `0.1.7-rc.1`（上游自述）与 `0.2.0-rc.2`（本仓库，`npm run test:host`）；`0.1.6-*` 仍是推断。** 旧版本那条判据——「该版本是否导出 `dshCachePath`」——现在有答案了：**0.2.0-rc.2 导出它**，`/health` 报 `dshCachePathExported: true`。早先「这台机器的构建没有这个导出」是 app.asar 对普通 shell 不可见造成的**测量假象**。
 
@@ -654,6 +655,6 @@ restored      : 2 file(s) back at /tmp/dsh-reclaim-verify/cache/attachments/requ
 5. **`purge` 之后隔离区根目录是否总被清掉。** 代码意图明确（`pruneEmptyDirs(pruneFrom, {keepRoot:false})`，`lib/purge.js:123-131`），但「清空后根目录一定消失」依赖文件系统在那一刻允许 `rmdir`；`ENOENT`/`ENOTEMPTY` 都不算失败（`lib/restore.js:283-311`），所以根可能合法地留下。我没有在真机跑清空来确认。
 6. **附件/缓存清理通路是「尚未实现」还是「已被移除」。** 这一条现在有答案了：`git log -S "attachment: 'attachments'" -- lib/trash.js` 只命中引入搬运原语的那一个提交（`d41600f`「feat: 隔离区搬运、清单、恢复与彻底清空」），`git log --all -S "kind: 'attachment'"` 与 `-S "attachmentId:"` **零命中**。三个子目录是跟着搬运原语一起、**作为预留结构引入的，从未有过生产者**。所以是尚未实现，不是被移除。
 7. **`sessionIds` 之外的记账残留会不会影响宿主的其他行为。** 删掉已归档会话会在注册表全局的归档集合里留下 id（`lib/workspace-sync.js:11-15`），代码报为 `dangling`；宿主之外还有什么组件会读那个集合，本仓库看不出来。
-8. **`desktop` profile 上的真机行为。** 所有实测都在一个一次性 `web` profile 里做的（`scripts/verify-host.sh`）。`desktop` profile 由 Electron 独占，只有带 `manageDesktopProfile: true` 标记的 CLI 能管它，所以本文没有在活着的桌面 profile 上跑过任何一次清理。桌面端与 web 端在这个插件的依赖面上应该没有差别（它只用 `ctx.effect`、`ctx.connection.fetch.register`、`ctx.get` 与四个服务），但**这是推断，不是实测**。隔离区归属判定与路径解析都按 `$DSH_HOME` 走，与 profile 种类无关。
+8. **`desktop` profile 上的真机行为 —— 已推进到「没有 desktop 专属的东西需要适配」，并把它做成了断言（本条保留原状记录）。** 原状：所有实测都在一个一次性 `web` profile 里做的（`scripts/verify-host.sh`）；`desktop` profile 由 Electron 独占，没有在活着的桌面 profile 上跑过任何一次清理；「两端在这个插件的依赖面上应该没有差别」是推断，不是实测。现在有四条证据。①**`--profile desktop` 无法从任何命令行启动**：`rejectElectronProfile`（`@deepseek-ai/dsh/lib/bin.js:35-37`）内容是 `if (profile.toLowerCase() === "desktop") program.error(...)`，它在 profile action（`:112`）里**没有任何开关保护**，只有 `plugin` 子命令那次调用（`:119`）带 `if (!manageDesktopProfile)`——所以 `manageDesktopProfile: true` 只解锁 `dsh plugin --profile desktop`，不解锁启动。实测两次：`ELECTRON_RUN_AS_NODE=1 … --profile desktop --dump-config` 与直接 import 后调 `runDesktopCli()` 都报同一条错。真正的启动器是 carrier：`dsh-desktop-host/lib/index.js:216` 的 `main()` 自己调 `runProfile`，绕过 `parseDshArgs`，并把 `--no-open --port 19387` **写死**。②**carrier 不是 profile 成员**，它从外面叠上去，所以 profile 的组成就是它自己声明的 bundle 列表（活的那份声明 15 个：两个官方 bundle 打头，后面 13 个是第三方插件）。③**它需要的每个服务都由那两个官方 bundle 提供**：活 desktop profile 合成出的 `cordis.yml`（330 条）里，`sessions` / `attachments` / `sessionQuery` / `tools` / `connection.fetch` 的提供者分别是 `@deepseek-ai/dsh-session-persistence-jsonl`（`:225`）、`dsh-attachment-local`（`:229`）、`dsh-session-query-sqlite`（`:231`）、`dsh-tools`（`:517`）、`dsh-client-connection`（`:690`），全部来自 `dsh-base` + `dsh-web-app`；那 13 个第三方 bundle 一个都没参与。④**插件分不出两者**：`lib/` 里 `DSH_PROFILE` 与 `profileContext` **零命中**，唯一读的环境变量是 `DSH_HOME`（`lib/paths.js:260` `const env = options.env ?? process.env`，`:262` `const envValue = env.DSH_HOME`），而 desktop 与 web 用的是同一个 `~/.dsh`。`scripts/verify-desktop.sh` 把①②③④都做成了断言（①②③ 只读扫描活 profile 自己的配置，④ 扫 `lib/*.js`），再从一个 `web` 模板克隆出来的一次性 home 里跑完整闭环（清一个缓存族 + 逐字节还原），**前后比对活 desktop profile 三个文件的 sha256** 来证明整个过程没有碰过它——那是一条断言，不是承诺。**仍未做的**：在 Electron 窗口里真的点一遍（与第 10 条同一个缺口），以及那 13 个第三方 bundle 会不会影响本插件——它们不提供任何被依赖的服务，所以按当前证据不会，但那是从「提供者是谁」推出来的，不是实测出来的。
 9. **`canonicalizeWatchPath` 在真包上的契约 —— 已由宿主闭环第 5 步覆盖（本条保留记录）。** 原状：两层闭环都只走到 `/health`，而 `/health` 经 `resolveLayout`（`lib/paths.js:291`）只拼 `trash.root` 字符串，不会调用它；它只在 `makeIsInsideTrash` 内部被惰性调用（`lib/paths.js:337`、`lib/paths.js:351`），也就是只有在真的移动或还原时才会执行；单元那层把它换成了替身（`test/hooks/peer-double.mjs`），宿主那层根本没触发它。现在 `scripts/verify-clear.mjs` 在真宿主上真的搬走一个缓存族再逐字节还原，两次判定都必须返回 `false` 才能成功（返回 `true` 会以「已经在隔离区里」被拒），所以这个函数在真包上**至少被走到并且给出了正确的否定判定**。仍然没验到的是它的边界：不存在的路径、符号链接、权限错误——那些会走 `catch` 分支返回 `true`（fail-closed，拒绝移动），方向是安全的，但**没有实测过**。
 10. **面板的按钮到路由之间那一段，没有在真浏览器里点过。** 两半各自有证据：渲染由 `test/client-panel.test.js` 在 `node:vm` 里直接调 `renderPanel` 断言（复选框的可用/禁用、原因文案、卡片缺席），路由由宿主闭环第 5 步用 `curl` 断言。中间那段——`clearableIdSet()` 认不认得出这一行、`cleanUp()` 的分流会不会把 id 发到**对**的那条路由、混合选择时那条提示——只在假 DOM 上走过，**没有人真的在浏览器里勾一个缓存族再点批量清理**。要补上它需要在一次性 profile 里开真界面点一遍；本轮没做。

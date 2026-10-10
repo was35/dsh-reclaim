@@ -69,6 +69,35 @@ curl -b <会话 cookie> http://127.0.0.1:<端口>/api/dsh-reclaim/health
 | `0.1.7-rc.1` | **已验证** | 独立 home + `0.1.7-rc.1` 的完整依赖树（277 个包）。能力探测 7/7 通过；该版本导出 `dshCachePath`，插件据此**自动改选**了新布局 `cache/attachments/request-images`；真实浏览器面板正常 |
 | `0.1.6-*` | **推断，未实测** | 位于两个已验证版本之间，故一并纳入范围；真要依赖它之前建议先验一遍 |
 | `0.2.0-rc.2` | **已验证** | 本仓库实测：隔离 home 里的 `web` profile 装上本插件，能力探测 **7 present / 0 missing**，`request-images` 解析到 `cache/attachments/request-images`，`dshCachePathExported: true`。`npm run test:host` 每次都会重跑并**断言**这三条（以前只是打印） |
+| `0.2.0-rc.2` **desktop 端** | **已验证到「不需要专门适配」** | 见下节。`npm run test:desktop` 把它做成了断言 |
+
+### desktop 端：结论是**没有 desktop 专属的东西需要适配**
+
+这一节的每一条都由 `npm run test:desktop` 断言，不是推断（下面引的宿主源码都在 `app.asar` 里，不在本仓库）：
+
+- **`desktop` profile 无法从任何命令行启动**，这是设计而不是缺陷。`@deepseek-ai/dsh/lib/bin.js:35-37` 的 `rejectElectronProfile`
+  对 `--profile desktop` 无条件报错，而它在 profile action（`:112`）里**没有开关保护**；`manageDesktopProfile: true`
+  只解锁 `dsh plugin --profile desktop`（`:119`），不解锁启动。真正启动它的是 carrier——`dsh-desktop-host/lib/index.js:216`
+  的 `main()` 自己调 `runProfile`，绕过参数解析，并把 `--no-open --port 19387` **写死**。所以第二个 desktop 实例
+  必然和活着的那个抢端口，**任何隔离验证都不可能在真的 `desktop` profile 上做**。
+- **carrier 不是 profile 成员**，它从外面叠上去。所以 profile 的组成就是它自己声明的 bundle 列表——两个官方
+  bundle 打头，后面 13 个是第三方插件。
+- **这个插件需要的每个服务都由那两个官方 bundle 提供**：读活 desktop profile 合成出的 `cordis.yml`（330 条），
+  `sessions` / `attachments` / `sessionQuery` / `tools` / `connection.fetch` 的提供者分别是
+  `@deepseek-ai/dsh-session-persistence-jsonl`、`dsh-attachment-local`、`dsh-session-query-sqlite`、`dsh-tools`、
+  `dsh-client-connection`，**全部来自 `dsh-base` + `dsh-web-app`**，那 13 个第三方 bundle 一个都没参与。
+- **插件分不出两者**：`lib/` 里 `DSH_PROFILE` 与 `profileContext` 零命中，唯一读的环境变量是 `DSH_HOME`
+  （`lib/paths.js:260-262`），而 desktop 与 web 用的是同一个 `~/.dsh`。它的全部世界观就是 home 目录。
+
+`npm run test:desktop` 因此做四件事：只读扫描活 desktop profile 的配置并断言上面第二、三条；断言 `lib/*.js`
+里除 `DSH_HOME` 外不读任何环境变量、也不提 profile 名（那就是第四条，多读一个变量就 FAIL，因为那会是一个
+可能在两端不同的新输入）；在一个从 `web` 模板克隆出来的一次性 home 里跑完整闭环；**前后比对活 desktop profile
+三个文件的 sha256**——最后这条是「没有污染全局环境」的断言，不是承诺。它默认保留那个 home
+（`/tmp/dsh-reclaim-desktop-verify`），可以继续用来验别的插件，并打印一条 `rm -rf` 供你随时完全清理。
+
+> 仍未做的：在 Electron 窗口里真的点一遍（见 [docs/safety.md](docs/safety.md) §9 第 10 条），以及那 13 个第三方
+> bundle 会不会影响本插件——它们不提供任何被依赖的服务，所以按当前证据不会，但那是从「提供者是谁」推出来的，
+> 不是实测出来的。
 
 > 版本范围的实现方式值得说明：**必须逐 minor 串 OR 子句**，
 > `>=0.1.5-rc.1 <0.3.0-0 || >=0.1.6-0 <0.1.7-0 || >=0.1.7-0 <0.1.8-0 || >=0.2.0-rc.1 <0.3.0-0`。
@@ -110,14 +139,21 @@ curl -b <会话 cookie> http://127.0.0.1:<端口>/api/dsh-reclaim/health
 仓库自带两层闭环，都不需要额外依赖：
 
 ```sh
-npm test          # 单元：node:test，零依赖
-npm run test:host # 真宿主在环：装一遍、启一遍、探 /health，再清一个缓存族并还原
-npm run test:all  # 先单元、后宿主
+npm test            # 单元：node:test，零依赖
+npm run test:host   # 真宿主在环：装一遍、启一遍、探 /health，再清一个缓存族并还原
+npm run test:desktop # 上面那一整套，外加对活 desktop profile 的四条断言（只读）
+npm run test:all    # 先单元、后宿主
 ```
 
 `npm run test:host` 默认在 `/tmp/dsh-reclaim-verify` 下建一个**一次性 `web` profile**，跑完删掉；
 `KEEP_HOME=1 npm run test:host` 保留它，那个 profile 可以继续用来验别的插件。它**不碰** `desktop` profile，
 并且自带一道拒绝真实 home 的守卫——把 `VERIFY_HOME` 指向 `$HOME` 会被直接拒绝（退出码 2）。
+
+`npm run test:desktop` 是宿主闭环的超集：它先只读扫描活 desktop profile 自己的配置并断言「插件要的五个服务
+全由那两个官方 bundle 提供」，再在 `/tmp/dsh-reclaim-desktop-verify` 下从 `web` 模板克隆一个
+`desktop-clone` profile 跑完整闭环（端口 19400，避开桌面端写死的 19387），最后比对活 desktop profile 三个
+文件的 sha256 证明没碰过它。那台机器上没有 desktop profile 时它以退出码 3 跳过并说明原因。它**不**在
+`test:all` 里——`test:all` 要在任何机器上都能跑，而这个脚本的前提是装了桌面端。
 
 宿主那一层刻意**不用**测试替身：它证明的是宿主真的接受这份 manifest 与 patch。脚本还会显式断言 stderr 里
 没有 `did not activate`——**宿主带着一个挂掉的插件条目也能正常启动**，不断言这一条就会假绿。
