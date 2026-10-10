@@ -1,5 +1,5 @@
 {
-  "name": "dsh-reclaim",
+  "name": "@was35/dsh-reclaim",
   "version": "0.1.0",
   "description": "Audit DeepSeek Harness disk usage (sessions, attachments, rebuildable caches), classify it by risk, and move anything you choose to delete into the plugin's own recoverable trash. The model can query, never delete.",
   "type": "module",
@@ -29,12 +29,12 @@
   "author": "gankudadiz",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/gankudadiz/dsh-reclaim.git"
+    "url": "git+https://github.com/was35/dsh-reclaim.git"
   },
   "bugs": {
-    "url": "https://github.com/gankudadiz/dsh-reclaim/issues"
+    "url": "https://github.com/was35/dsh-reclaim/issues"
   },
-  "homepage": "https://github.com/gankudadiz/dsh-reclaim#readme",
+  "homepage": "https://github.com/was35/dsh-reclaim#readme",
   "engines": {
     "node": ">=20.0.0",
     "dsh": ">=0.1.5-rc.1 <0.2.0 || >=0.1.6-0 <0.1.7-0 || >=0.1.7-0 <0.1.8-0"
