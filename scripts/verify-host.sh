@@ -124,6 +124,33 @@ node -e '
   console.log("   request-images: " + (images?.layout?.selected ?? "?") + " → " + (images?.path ?? "?"))
   console.log("   dshCachePath  : exported=" + (images?.layout?.dshCachePathExported ?? "?") +
               " anomaly=" + (images?.layout?.anomaly ?? "?"))
+
+  // The layout values above used to be printed and never checked, which made
+  // this loop pass while showing a regressed value: `ok` and `capabilities` are
+  // produced by the backend check, not by the path resolution, so a layout
+  // regression could not turn either of them red. They are asserted here
+  // because this is the ONLY place the real `@deepseek-ai/dsh-home-paths`
+  // supplies them — the unit tests map that specifier to a double
+  // (`test/hooks/peer-shim.mjs`), so nothing else can catch a divergence.
+  if (images === undefined) {
+    console.error("FAIL: /health reported no request-images family; families were:", JSON.stringify((payload.families ?? []).map((family) => family.id)))
+    process.exit(1)
+  }
+  // A fresh home created by this script has no legacy leftovers, so the
+  // authoritative location is the `cache` one and there is nothing to flag. Both
+  // assertions are therefore exact rather than "non-null".
+  if (images.layout?.selected !== "cache") {
+    console.error("FAIL: request-images resolved to the", JSON.stringify(images.layout?.selected), "candidate, not `cache`; layout was", JSON.stringify(images.layout))
+    process.exit(1)
+  }
+  if (images.layout?.dshCachePathExported !== true) {
+    console.error("FAIL: dsh-home-paths no longer exports dshCachePath, so the plugin fell back to a guessed path; layout was", JSON.stringify(images.layout))
+    process.exit(1)
+  }
+  if (images.layout?.anomaly !== null) {
+    console.error("FAIL: request-images reported an anomaly in a freshly created home:", JSON.stringify(images.layout.anomaly))
+    process.exit(1)
+  }
 ' "$VERIFY_HOME.health.json"
 
 echo "PASS: the plugin mounted on the real host and every capability it needs is present."
