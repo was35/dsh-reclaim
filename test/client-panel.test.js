@@ -61,7 +61,13 @@ const loaded = (() => {
   })
   const panel = sandbox.__dshReclaimPanel
   assert.notEqual(panel, undefined, 'the panel exposed no test seam')
-  return { react, plugin, renderPanel: panel.renderPanel }
+  return {
+    react,
+    plugin,
+    renderPanel: panel.renderPanel,
+    classifyUrl: panel.classifyUrl,
+    formatClock: panel.formatClock,
+  }
 })()
 
 /** The panel's own Chinese dictionary, so the assertions can read the strings a user reads. */
@@ -326,4 +332,46 @@ test('the clearables card and the session tiers are separate surfaces', () => {
   for (const tier of tierElements) {
     assert.equal(walk(tier).some((node) => node.props?.['data-dshr-row'] === 'cache-family:request-images'), false)
   }
+})
+
+test('the panel dates the facts it shows, and dates them with the scan that read them', () => {
+  const scannedAt = '2026-01-02T03:04:05.000Z'
+  const tree = render({ ...reportWith({}), scannedAt, generatedAt: '2026-01-02T09:00:00.000Z' })
+  const stamp = walk(tree).find((node) => node.props?.['data-dshr-as-of'] !== undefined)
+  assert.notEqual(stamp, undefined, 'a dated report rendered no as-of line')
+  // The scan instant, not the grading instant: `generatedAt` is always "now", so rendering it
+  // here would tell the user the facts are fresher than they are.
+  assert.equal(stamp.props['data-dshr-as-of'], scannedAt)
+  const clock = loaded.formatClock(scannedAt)
+  assert.match(clock, /^\d{2}:\d{2}:\d{2}$/)
+  assert.equal(textOf(stamp), `数据截至 ${clock}`)
+})
+
+test('a report that carries no scan instant is left undated rather than dated now', () => {
+  for (const missing of [undefined, null]) {
+    const tree = render({ ...reportWith({}), scannedAt: missing })
+    const stamp = walk(tree).find((node) => node.props?.['data-dshr-as-of'] !== undefined)
+    assert.equal(stamp, undefined, `scannedAt=${String(missing)} was rendered as a date the report does not have`)
+    assert.doesNotMatch(textOf(tree), /数据截至/)
+  }
+})
+
+test('a clock is only rendered for an instant that can actually be parsed', () => {
+  assert.equal(loaded.formatClock('not a date'), null)
+  assert.equal(loaded.formatClock(undefined), null)
+  assert.equal(loaded.formatClock(null), null)
+  assert.equal(loaded.formatClock(''), null)
+})
+
+test('only an explicit rescan asks the route to re-read the disk', () => {
+  const cached = loaded.classifyUrl(30, false)
+  assert.match(cached, /thresholdDays=30/)
+  assert.doesNotMatch(cached, /rescan=1/, 'opening the panel would rebuild the world it already has')
+
+  const rescanned = loaded.classifyUrl(7, true)
+  assert.match(rescanned, /thresholdDays=7/)
+  assert.match(rescanned, /rescan=1/)
+
+  // Changing the risk dial re-grades facts already in memory; it never re-reads session logs.
+  assert.doesNotMatch(loaded.classifyUrl(90), /rescan=1/)
 })
