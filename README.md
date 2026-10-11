@@ -163,6 +163,23 @@ npm run test:all    # 先单元、后宿主
 把 `@deepseek-ai/dsh-home-paths` 换成了替身，真包的契约它证不了。加这三条之前它们只是三行 `console.log`，
 而 `ok` 与 `capabilities` 由后端能力探测产生，**路径解析出错不会让它们变红**，所以布局回归能在这一层一路绿着过去。
 
+审计面板的耗时有一条自己的基准，跑的是**面板真实的加载路径**而不是单个函数：
+
+```sh
+LABEL=before PLUGIN_DIR=/tmp/dsh-reclaim-before sh scripts/bench-audit.sh   # 旧代码
+LABEL=after  PLUGIN_DIR="$PWD"                PREVIEW=1 sh scripts/bench-audit.sh
+```
+
+它先 `cp -R` 出一份**会话库的副本**再启动宿主：真实 `~/.dsh` 只被读，一个字节都不写进去——宿主启动会写
+session lock 与 projection 缓存，直接对真实 home 起 host 就不是只读了。副本里那些 lock 会被删掉，因为
+**复制来的 lock 是别的进程在别的时刻的 lock**，把它交给活态探针会改变分档。`PREVIEW=1` 走客户端冷启动的
+两段式（`?preview=1` 先画表，再取完整分档），`PREVIEW=0` 走旧客户端的一步到位。
+
+`scripts/bench-audit.mjs` 按客户端的顺序打这几次请求（冷、再打开一次、显式 `rescan=1`、最后取一次
+`/api/dsh-reclaim/sessions` 作对照），在 stdout 上留**一行 JSON**：每个阶段的毫秒数、会话数，以及响应**对
+自己新鲜度的说法**（`factsFromCache` / `scannedAt` / `scanCount` / `gate.coverage`）。耗时和新鲜度必须一起
+读——一个快的答案如果没说清它是哪一刻的，就不算数。
+
 宿主闭环的最后一步（`scripts/verify-clear.mjs`）是**唯一能证明这个插件的核心承诺的地方**：它在一次性 home 里
 种两个夹具文件，断言缓存族被判 `safe` / `batchClearable`，`POST /clear` 把它搬进隔离区且原路径消失，
 manifest 记下「哪一行 id 触发的」与 `originalPath → relativePath` 的映射，最后 `POST /restore` **逐字节**放回原处。
