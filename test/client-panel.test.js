@@ -363,6 +363,81 @@ test('a clock is only rendered for an instant that can actually be parsed', () =
   assert.equal(loaded.formatClock(''), null)
 })
 
+/**
+ * A pending report, as the route answers a `preview=1` request.
+ *
+ * The rows are real rows — title, size, age, archive badge — but every verdict that depends
+ * on the reference graph has been withdrawn by the server: the tier is `pending`, the row is
+ * not selectable, and the graph-derived numbers are null rather than zero.
+ */
+function pendingReport() {
+  const row = sessionRow(true)
+  row.pending = true
+  row.tier = 'pending'
+  row.selectable = false
+  row.batchClearable = false
+  row.dedupCount = null
+  row.freedByDeletingBytes = null
+  row.freedBreakdown = {}
+  const report = reportWith({})
+  report.pending = true
+  report.sessions = [row]
+  report.tiers.sessions = { pending: [row] }
+  return report
+}
+
+test('a pending paint shows the rows and their archive badges, and claims no tier', () => {
+  const tree = render(pendingReport())
+
+  const card = walk(tree).find((node) => node.props?.['data-dshr-pending'] === 'true')
+  assert.notEqual(card, undefined, 'a pending report rendered no pending surface')
+
+  // The row is there, with the two things the paint exists to show: the title and the badge.
+  const row = rowById(tree, 's-archived-demo')
+  assert.notEqual(row, null, 'a pending paint dropped its rows')
+  assert.equal(row.tier, 'pending')
+  assert.equal(row.selectable, 'false')
+  assert.equal(row.disabled, true)
+  assert.match(row.text, /a session with a title/)
+  assert.equal(textOf(archivedBadgeOf(tree, 's-archived-demo')), '已归档')
+
+  // No verdict may be drawn: safe/confirm/danger are answers, and the graph has not been read.
+  const headings = walk(tree)
+    .filter((node) => node.type === 'h4')
+    .map((node) => textOf(node))
+  assert.equal(headings.some((text) => /安全|需确认|危险/.test(text)), false, `a pending paint drew a verdict: ${JSON.stringify(headings)}`)
+  assert.ok(headings.some((text) => /判定中/.test(text)), 'the pending surface is not labelled as pending')
+})
+
+test('a pending paint offers nothing to clean up, and no numbers it has not read', () => {
+  const tree = render(pendingReport())
+
+  assert.equal(
+    walk(tree).some((node) => node.props?.['data-dshr-clean-selected'] === 'true'),
+    false,
+    'a pending paint offered the cleanup button, so the gap before the grade is actionable',
+  )
+  // The clearable-artifact card is graded from the graph too, so it is absent rather than empty.
+  assert.equal(walk(tree).some((node) => node.props?.['data-dshr-clearables'] === 'true'), false)
+  assert.match(textOf(tree), /参考图读完前不提供任何清理操作/)
+
+  // Zero would read as "nothing is reclaimable"; unknown is the only honest value here.
+  const net = walk(tree).find((node) => node.props?.['data-dshr-net'] !== undefined)
+  assert.equal(net.props['data-dshr-net'], 'pending')
+  assert.equal(textOf(net), '—')
+  assert.match(textOf(tree), /参考图读取中/)
+})
+
+test('a pending row states the size and age it does know, and marks the rest pending', () => {
+  const row = rowById(render(pendingReport()), 's-archived-demo')
+  assert.match(row.text, /4\.0 KB|4 KB|4096/)
+  assert.match(row.text, /判定中/)
+  // The graph-derived metrics are gone rather than zeroed.
+  assert.doesNotMatch(row.text, /张图片/)
+  assert.doesNotMatch(row.text, /删掉可释放/)
+  assert.doesNotMatch(row.text, /共享未释放/)
+})
+
 test('only an explicit rescan asks the route to re-read the disk', () => {
   const cached = loaded.classifyUrl(30, false)
   assert.match(cached, /thresholdDays=30/)

@@ -380,6 +380,7 @@ BATCH_SUBDIRS = { session: 'sessions', 'session-cache': 'session-caches',
 - **所有路由必须在 `/api/` 之下，且必须经 `ctx.connection.fetch.register` 注册。** 只有这个前缀能让宿主的 Host/Origin 围栏与 cookie 认证挡在 handler 前面；`ctx.webServer` 的路由**不带认证**，「a plugin that can delete data behind an unauthenticated route can be triggered by any page the user happens to visit」（`lib/routes.js:9-16`）。注册时对每条路由调用 `assertApiPath`，不合规直接抛错（`lib/routes.js:80-88`、`lib/routes.js:466`）。
 - **GET 永不改任何东西**；**每个 POST 都要求 body 里 `confirm: true`**，缺字段返回 **400 并附「会销毁什么」的描述**，因为那正是确认对话框需要的文本（`lib/routes.js:18-29`）。`POST /delete` 另接受 `dryRun`：「asking『what would happen』is never the same request as『do it』」。
 - 事实缓存**只在内存**：持久缓存会过期并授权错误删除（`lib/routes.js:30-37`、`lib/routes.js:284-341`）。
+- **首屏可以早于判词，但不可以冒充判词。** `GET /classify?preview=1` 只读「便宜的一半」——会话列举、附件遍历、缓存报告，**不打开任何会话日志**（`scanCheapFacts`，`lib/routes.js`）。它照样跑一遍分档以保持行形状一致，然后**把结果整体改标**：`pending: true`、每行 `tier: 'pending'`、`selectable: false`、`batchClearable: false`、`dedupCount` 与 `freedByDeletingBytes` 为 `null`（不是 0——0 会读成「没有」）、`tiers.sessions` 只有 `pending` 一档、`families` 为空（家族来自引用图）。理由：不带引用图的档位不是答案，所以一个档都不许声称；而任何 `pending` 行都不可选，**两段回答之间的空档不能被用来删任何东西**。预览与紧随其后的完整分档共用同一份便宜事实（`cheapFactsFor`），两次回答只付一次列举；删除路径的前置检查不受影响（见 §4.4、§4.5）。
 - 批次名经 `resolveBatchDir` 解析，越出隔离区即抛错「refusing to operate on X: it is not inside the quarantine」——这是防止请求点名 `sessions/` 的边界（`lib/routes.js:344-360`）。
 
 ### 5.2 Agent 侧只有只读工具
@@ -398,6 +399,7 @@ BATCH_SUBDIRS = { session: 'sessions', 'session-cache': 'session-caches',
 - 批量清：勾选 `safe` 行 → 按钮文案「清理所选 N 项（进隔离区，可恢复）」+ 注「只会搬进插件自带的隔离区，不会销毁任何东西」（`lib/messages.js:43-145` 对应键，`lib/client.js:625`）；
 - 需确认档：无复选框，「仍要清理…」展开后列出阻塞条件与家族规模，按钮「确认清理这一族」；家族整族一起动（`lib/client.js:755-790`、`lib/client.js:1081-1095`）；
 - 危险档：复选框禁用（`lib/client.js:674-690`）；
+- **参考图未读完时（冷启动首屏）**：表格照常显示标题与「已归档 / 归档状态未知」徽章，但分档标题写作「判定中…」、每行是**禁用**的 `pending` 复选框、行内只报「大小 / 未活动天数 / 判定中」（图片张数、删掉可释放、共享张数都来自引用图，此时**不显示**而不是显示 0）、顶部三个数字显示 `—`、清理按钮位置换成一句「参考图读完前不提供任何清理操作」（`lib/client.js` 的 `renderPending` 与 `renderRow` 的 `pending` 分支）。参考图读完后的完整分档自动替换这一屏。
 - 永久删除：**唯一使用浏览器原生 `window.confirm` 的地方**，先报「N 项 · X」再问，标题「彻底清空（不可恢复）」，正文「将永久删除 N 项、X。这不进回收站，无法撤销。」（`lib/client.js:1121-1126`、`lib/client.js:1421-1424`）。而且 `POST /purge` 会在缺少 `confirm` 时把 `wouldDestroy` 一并返回，界面据此显示数字（`lib/routes.js:619-637`）。
 
 ### 5.5 这些保证是怎么被验证的
