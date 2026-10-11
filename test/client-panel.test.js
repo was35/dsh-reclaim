@@ -132,7 +132,7 @@ function rowById(tree, id) {
 }
 
 /** A report carrying only what these tests are about. */
-function reportWith({ caches = {}, attachments = {} }) {
+function reportWith({ caches = {}, attachments = {}, sessions = {} }) {
   return {
     ok: true,
     scanCount: 1,
@@ -140,11 +140,49 @@ function reportWith({ caches = {}, attachments = {} }) {
     families: [],
     totals: { totalReclaimableBytes: 0, sessionCount: 0, dedupAttachmentCount: 0 },
     tiers: {
-      sessions: { safe: [], confirm: [], danger: [], unclassified: [] },
+      sessions: { safe: [], confirm: [], danger: [], unclassified: [], ...sessions },
       attachments: { safe: [], confirm: [], danger: [], unclassified: [], ...attachments },
       caches: { safe: [], confirm: [], danger: [], unclassified: [], reportOnly: [], ...caches },
     },
   }
+}
+
+/**
+ * A session row as the server grades it, carrying whatever archive state is under test.
+ *
+ * `archived` is passed through verbatim — including `null` and `undefined`, because the whole
+ * point of the badge is that "we could not read the archive set" must not be rendered as the
+ * absence that means "not archived".
+ */
+function sessionRow(archived) {
+  return {
+    kind: 'session',
+    id: 's-archived-demo',
+    tier: 'safe',
+    tierReasons: [],
+    blockingChecks: [],
+    selectable: true,
+    batchClearable: true,
+    dedupCount: 0,
+    freedByDeletingBytes: 4096,
+    freedBreakdown: {},
+    facts: {
+      title: 'a session with a title',
+      archived,
+      sizeBytes: 4096,
+      lastActivity: '2026-01-01T00:00:00.000Z',
+      ageDays: 41,
+      workspacePath: '/home/Projects/demo',
+      sessionIds: [],
+    },
+  }
+}
+
+/** The archive badge inside one row, found by the data attribute the badge carries. */
+function archivedBadgeOf(tree, id) {
+  const row = walk(tree).find((node) => node.props?.['data-dshr-row'] === id)
+  if (row === undefined) return null
+  return walk(row).find((node) => node.props?.['data-dshr-archived'] !== undefined) ?? null
 }
 
 const SAFE_FAMILY = {
@@ -240,6 +278,43 @@ test('an attachment still referenced by a session is never offered for clearing'
 test('with nothing to show the clearables card is absent, not empty', () => {
   const tree = render(reportWith({}))
   assert.equal(walk(tree).some((node) => node.props?.['data-dshr-clearables'] === 'true'), false)
+})
+
+test('an archived session wears a badge beside its title, not a word among the metrics', () => {
+  const tree = render(reportWith({ sessions: { safe: [sessionRow(true)] } }))
+  const badge = archivedBadgeOf(tree, 's-archived-demo')
+  assert.notEqual(badge, null, 'the archived session rendered no archive badge at all')
+  assert.match(String(badge.props.className), /dshr-badge-archived(\s|$)/)
+  assert.equal(textOf(badge), '已归档')
+
+  // Beside the title, not behind the time: the badge is a sibling of the title span and
+  // comes before the right-aligned clock.
+  const row = walk(tree).find((node) => node.props?.['data-dshr-row'] === 's-archived-demo')
+  const head = walk(row).find((node) => node.props?.className === 'dshr-row-head')
+  const order = (head?.children ?? []).map((child) => child?.props?.className ?? null)
+  assert.ok(
+    order.indexOf('dshr-row-title') < order.findIndex((name) => typeof name === 'string' && name.includes('dshr-badge-archived')),
+    `the archive badge is not beside the title: ${JSON.stringify(order)}`,
+  )
+})
+
+test('an unarchived session shows no archive badge, and does not claim one either way', () => {
+  const tree = render(reportWith({ sessions: { safe: [sessionRow(false)] } }))
+  assert.equal(archivedBadgeOf(tree, 's-archived-demo'), null, 'an unarchived session wore an archive badge')
+  const row = rowById(tree, 's-archived-demo')
+  assert.doesNotMatch(row.text, /已归档/)
+  assert.doesNotMatch(row.text, /归档状态未知/)
+})
+
+test('an archive state that could not be read says unknown, never "not archived"', () => {
+  for (const unreadable of [null, undefined]) {
+    const tree = render(reportWith({ sessions: { safe: [sessionRow(unreadable)] } }))
+    const badge = archivedBadgeOf(tree, 's-archived-demo')
+    assert.notEqual(badge, null, `archived=${String(unreadable)} rendered no badge, which reads as "not archived"`)
+    assert.match(String(badge.props.className), /dshr-badge-archived-unknown/)
+    assert.equal(textOf(badge), '归档状态未知')
+    assert.doesNotMatch(rowById(tree, 's-archived-demo').text, /已归档/)
+  }
 })
 
 test('the clearables card and the session tiers are separate surfaces', () => {
