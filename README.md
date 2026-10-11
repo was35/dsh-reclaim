@@ -186,6 +186,20 @@ manifest 记下「哪一行 id 触发的」与 `originalPath → relativePath` �
 
 同一节还记下了修复之后的**代价**，因为它们是有意选择的：一条删除现在会多读一次引用关系（缓存命中时为零），**被别的会话引用的会话会被服务端直接拒绝搬走**，引用关系读不出来**或没能证明读完**时也拒绝——宁可少删，不可删错。
 
+## 发版
+
+版本号在 `package.json`，变更按时间倒序写进 [CHANGELOG.md](CHANGELOG.md)（Keep-a-Changelog 子集：只用 `Added` / `Changed` / `Fixed` / `Security` 这几个**英文**小节名，正文中文）。一版的完整动作：
+
+```sh
+# 1) 抬 package.json 的 version，并在 CHANGELOG.md 顶部加一节
+npm test
+git commit -am "release: vX.Y.Z" && git push origin main
+git tag -a vX.Y.Z -m "vX.Y.Z — 一句话" && git push origin vX.Y.Z
+gh release create vX.Y.Z --title "vX.Y.Z — 一句话" --notes-file <把 CHANGELOG 里那一节存成的文件>
+```
+
+**为什么要三样都做**：桌面端面板里那行「有新版本 …」和它下面的更新说明**都不读本仓库的文件**——市场客户端只认一份**按仓库 URL 索引**的中央产物（`awesome-dsh-plugin.com/updates.json`，每天探一次），条目内容是 **Release 正文**或提交切片，仓库不在那份目录里就永远显示「该插件未提供更新说明」；另一条路 `dsh-plugin-update` 读的是**新版 npm tarball 里包根的 `CHANGELOG.md`**，因此要求包真的发到 npm（本包目前不在 npm 上）。两条路都认「仓库 + 版本」这个身份，所以 tag、Release、CHANGELOG 一起写，等哪天被目录收录或发上 npm，说明自然出现，不用再改代码。
+
 ## 不做的事
 
 不清理日志 / 备份目录 / 附件存储之外的临时文件（附件存储自己的原子写暂存区 `attachments/v1/tmp` 属于可重建残留，会清）；**不清理附件对象**——它们全都被至少一个会话引用着，所以一个都到不了「安全」档，见 [docs/safety.md](docs/safety.md) §8.8；不管理 `profiles/` 下的插件依赖；不做定时自动清理；不允许模型替用户删数据；不支持远端 / 共享存储后端。
