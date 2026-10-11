@@ -310,16 +310,26 @@ BATCH_SUBDIRS = { session: 'sessions', 'session-cache': 'session-caches',
 
 > **崩溃规则：manifest 不在移动之前写。** 一个有内容没 manifest 的批次目录因此只意味着一件事：操作被中断。它被报为 `incomplete` 并列出给用户，**永不自动清理**——自动清理它就是插件自行删数据（`lib/manifest.js:28-34`、`lib/purge.js:165-222`）。
 
+**没 manifest 的批次不再是一条死路（issue #1 修复之一）。** 批次目录本身是一份镜像：每个条目的原始路径就写在它的目录名里（`<batchDir>/<kind 子目录>/<volumeRoot 起的各段>`）。所以清单缺失时，记录可以**从布局读回来**：`reconstructEntries`（`lib/recover.js`）按「一个条目 = 一个直接含文件的目录，或一个空目录」的边界规则把 `originalPath` / `relativePath` / `kind` / `sessionId` 重新推出来，`planRestore` 据此规划、`restoreBatch` 据此还原，并在还原之后把这份重建出来的记录**落盘**（重建在 `lib/restore.js:85-110`，落盘在 `lib/restore.js:239-240`）。`listBatches` / `describePurge` 也用它把「条目数未知」换成真实项数（见 §4.8）。重建出的条目带 `inferred: true`，清单的 `notes` 里写明这是从布局推回来的，**不谎称它就是当初写下的那份记录**。
+
+> 只有**完全没有**清单时才重建。清单存在但校验不通过是另一回事——那是「记录与批次不一致」的真 bug，把它偷偷换成一份新记录等于把问题藏起来（`lib/restore.js:85-88`）。
+>
+> **重建的已知局限**：镜像不记录条目边界。一个自身顶层只有目录的条目，会被在更深一层拆成多块、分别还原到（还原时才创建的）原目录里，效果等价于把一棵树分块重建；条目自身的文件都回得来，中间目录的归属只是重新推断的。
+
 写入用**临时文件 + rename**，这样写到一半崩溃不会留下能解析成有效 manifest 的半成品（`lib/manifest.js:176-195`）。这是整个插件里唯一允许 rename 存在活目标的地方，因为 `renameSync` 的静默覆盖在这里正是需要的语义。
 
-### 4.6 「删除」执行时的四条失败规则
+**写清单是并集，不是覆盖（issue #1 修复之二）。** 一次移动不再 `writeManifest(batchDir, 新清单)` 整份盖掉旧记录，而是 `mergeIntoManifest(batchDir, candidate, { volumeRoot })`（`lib/recover.js`）：读回现有清单、按 `relativePath` 合并、再写，并在写后**回读校验**「本次要写的每一条都在里面」。理由是 §8.9 讲的那次事故：同一秒里的第二次移动把第一次的记录盖掉了，而那条记录是那些条目唯一的来路。另有一条硬规则：**两个批次若记着不同的 `volumeRoot`，合并被拒绝**（返回 `ok: false` + 理由）——把两个根的路径混进一份清单，等于写出一份自己都不知道指向哪里的记录。
 
-`deleteSessionItems`（`lib/trash.js:682-867`）：
+### 4.6 「删除」执行时的失败规则
 
-- **先规划再动手**；`dryRun` 只回 `wouldMove` / `skipped`，不碰任何东西（`lib/trash.js:729-749`）；
-- 一件都搬不动时**不建批次、不写 manifest**，返回 `ok: false` 并逐条给出理由：「none of the N item(s) could be moved, so no batch was created and no manifest was written; each item is listed with its reason and every one of them is still in place」（`lib/trash.js:751-773`）；
-- 只有真搬成功的条目进 manifest（`lib/trash.js:794-800`）；
-- 任何一项搬不动都**留在原地**并在报告里列明。会话条目全部搬完才做 ③ 的记账（`lib/trash.js:835-860` 附近）。
+`deleteSessionItems`（`lib/trash.js:787-1011`），顺序是**先认领目录、再规划、再动手**：
+
+- **先认领一个批次目录**：`claimBatchDir`（`lib/trash.js:626-699`）按同一秒的第一个候选名（`<stamp>`、`<stamp>-2`、…）用 `mkdirSync`（非 recursive，`EEXIST` 即别人先到）认领一个目录。**它只复用属于同一次操作的目录**：空目录可复用；已有清单且 `sessionIds` 含本次的 `sessionId`（无 `sessionId` 时要求该批次也没有 session 归属）才复用；属于别的会话、或持有说不清内容（无清单 / 清单读不出来）的目录一律跳过——**往一个不可恢复的批次里继续堆数据只会把损失做大**（`lib/trash.js:599-624` 的设计注释）。设计里 100 个候选名都用满则拒绝并说明（`lib/trash.js:691-698`）。
+- 认领失败时 `ok: false`，且**什么都没搬**（`lib/trash.js:825-840`）。认领必须发生在规划之前，因为规划里的目的地路径就在那个目录里（`lib/trash.js:813-824`）。
+- **先规划再动手**；`dryRun` 只回 `wouldMove` / `skipped`，不碰任何东西，且**不认领**（走纯函数 `batchDirFor`，所以预览能报出「会进哪个目录」而不占位）（`lib/trash.js:821-823`、`lib/trash.js:862-882`）；
+- 一件都搬不动时**不写 manifest**，返回 `ok: false` 并逐条给出理由：「none of the N item(s) could be moved, so no batch was created and no manifest was written; each item is listed with its reason and every one of them is still in place」（`lib/trash.js:884-907`）。此时如果目录是本次调用创建的，`releaseEmptyBatch` 把它删回去；复用来的目录一律不动（`lib/trash.js:708-715`）；
+- 只有真搬成功的条目进 manifest（`lib/trash.js:936-947`），写入走**并集合并**而不是覆盖（`lib/trash.js:961-965`，见 §4.5）；
+- 任何一项搬不动都**留在原地**并在报告里列明。会话条目全部搬完才做 ③ 的记账；记账是对刚写好的清单做**无 await 间隙**的读-改-写，所以并集不会在这里被丢掉（`lib/trash.js:967-984`）。
 
 跨卷时 `copyTreeVerified` 会先数一遍、拷贝后再校验文件数与字节总量；**符号链接永不跟随**（跟随会复制到树外），有 links 则 `verified: false` 且**原文件不得删除**（`lib/trash.js:371-427`）。`removeTreeVerified` 用显式遍历（因为 `rmSync` 无效），目录按深度降序删——注释说反转发现顺序**不够**，实测曾留下空批次树（`lib/trash.js:437-491`）。
 
@@ -327,9 +337,11 @@ BATCH_SUBDIRS = { session: 'sessions', 'session-cache': 'session-caches',
 
 还原是移动的镜像，多一条规则——**还原永不覆盖**（`lib/restore.js:1-13`）：移动时目的地是插件自己的批次，冲突只意味着「这个批次已经有它」；还原时目的地是用户的活树，那时用户可能已经建了同 id 的新会话、手工放回了文件、或用别的批次还原过同一路径。覆盖会毁掉用户现有的东西，所以正确行为是**停下并说明**。
 
-逐条状态（`lib/restore.js:60-122`）：`batch-item-missing`（批次声称有而实际没有）、`target-inside-trash`、`target-occupied`（「something already exists at the original path; a restore never overwrites it」）、`target-unusable`（父路径存在但不是目录），否则 `pending`。执行时再**检查一次**目标是否出现（规划与还原之间可能有人创建），然后 `moveBack`（`lib/restore.js:131-257`）。
+逐条状态（`lib/restore.js:72-188`）：`batch-item-missing`（批次声称有而实际没有）、`target-inside-trash`、`target-occupied`（「something already exists at the original path; a restore never overwrites it」）、`target-unusable`（父路径存在但不是目录），否则 `pending`。执行时再**检查一次**目标是否出现（规划与还原之间可能有人创建），然后 `moveBack`（`lib/restore.js:196-334`）。
 
-完成后重写 manifest：全部还原则删掉 `manifest.json`，否则重写条目并追加 note「restored N item(s) at <ISO>; M remain in this batch」。失败条目**保留在 manifest 里**——「批次不得声称持有它没有的东西，也不得停止声称它持有的东西」（`lib/restore.js:170-200` 附近）。
+**没有清单的批次可以被还原（issue #1 修复之三）。** `planRestore` 读不到清单时不再直接返回失败，而是从布局推回条目（见 §4.5），并把这个事实报为 `reconstructed: true`。这里的 `reconstructed` 说的是**本次规划真的读了布局**，不是「这份清单历史上是重建出来的」——重建后的记录落盘以后就是一份普通记录，下一次规划它是 `reconstructed: false`（`lib/restore.js:84-110`、`lib/restore.js:196-334`）。
+
+完成后重写 manifest：全部还原则删掉 `manifest.json`，否则重写条目并追加 note「restored N item(s) at <ISO>; M remain in this batch」。失败条目**保留在 manifest 里**——「批次不得声称持有它没有的东西，也不得停止声称它持有的东西」（`lib/restore.js:231-268`）。**一条例外：被重建出来的记录即便一条都没还成也落盘**（`lib/restore.js:239-240`）——这样那个批次从此不必再靠推断描述自己；而删 `manifest.json` 遇到 `ENOENT` 不算失败（重建批次本来就没有这个文件），记为 `alreadyAbsent`（`lib/restore.js:247-252`）。
 
 ### 4.8 purge：唯一销毁数据的操作
 
@@ -337,8 +349,10 @@ BATCH_SUBDIRS = { session: 'sessions', 'session-cache': 'session-caches',
 
 - **永不自作主张**：没有定时器、没有计划、没有「清理旧批次」路径；
 - **确认不是本模块的事**：界面问「permanently delete N items, X MB」并传 `confirmed: true`；`purgeBatch` 缺这个字段一律拒绝，理由「a permanent delete requires an explicit confirmation; this call did not carry one, so nothing was touched（the interface is responsible for asking the user first）」（`lib/purge.js:101-113`）；
-- **先报字节再删除**：`describePurge` 给出 `wouldDestroy` =「N item(s), M file(s), X B」（`lib/purge.js:50-86`）；
-- **拒绝自行解释**：有内容没 manifest 的批次报为 `incomplete`，**不按名字删除**；只有显式「删除这个目录」的请求才碰它，且那个请求会列出即将销毁的东西（`lib/purge.js:165-222`）。
+- **先报字节再删除**：`describePurge` 给出 `wouldDestroy` =「N item(s), M file(s), X B」（`lib/purge.js:62-114`）；
+- **拒绝自行解释**：有内容没 manifest 的批次报为 `incomplete`，**不按名字删除**；只有显式「删除这个目录」的请求才碰它，且那个请求会列出即将销毁的东西（`lib/purge.js:193-256`）。
+
+**「说不清内容」的那一行也给出真实项数（issue #1 修复之三的顺带结果）。** 清单缺失的批次，`describePurge` 与 `listBatches` 用同一套 `reconstructEntries` 从布局读回条目：`entries` 从 `null`（界面显示 `?`）变成真实项数，`sessionIds` 给出推断值，`reconstructed: true` / `recoverable: true`，`wouldDestroy` 前缀写明「N reconstructed item(s)，…」，理由行写明「N item(s) were read back from the batch layout and can be restored」（`lib/purge.js:69-98`、`lib/purge.js:233-255`）。**清单存在但损坏的批次仍然报 `entries: null`**——那种情况不该用推断值掩盖（`lib/purge.js:69-99`）。客户端因此不需要为这件事改动：条目计数本来就渲染 `batch.entries`，`?` 与数字走的是同一条通路（`lib/client.js:954`），恢复按钮本来也无条件渲染（`lib/client.js:970-985`）。
 
 `pruneEmptyParents !== false` 时，从**批次的父目录**（隔离区一侧）清空目录——注释解释为什么不能从批次目录本身走：批次目录刚被删掉，走它什么也删不掉，实测第一版就是这样，用户清空一切后仍看到隔离区目录（`lib/purge.js:123-131`）。
 
@@ -352,7 +366,7 @@ BATCH_SUBDIRS = { session: 'sessions', 'session-cache': 'session-caches',
 |---|---|---|
 | `purgeBatch` → `removeTreeVerified` | 整个批次目录 | 人点名批次并确认（`lib/purge.js:101-147`） |
 | 跨卷移动的 fallback | 原件（在副本按字节校验通过之后） | `EXDEV`，`lib/trash.js:507-591` |
-| `restoreBatch` 全部还完 | `manifest.json` 一个文件 | 批次空了，`lib/restore.js:131-207` |
+| `restoreBatch` 全部还完 | `manifest.json` 一个文件 | 批次空了，`lib/restore.js:239-253` |
 | `pruneEmptyDirs` | 空目录（`rmdirSync`，不碰文件） | 还原或清空之后 |
 
 **除此之外，一切「清理」都是搬动。** 这条有代码可查：整个插件的写入作用域只有隔离区（`lib/trash.js:48-50`），路由头部的措辞是「No route writes outside `<home>/.dsh-reclaim-trash/`. The plugin's only mutating operation is moving data INTO the quarantine; nothing destroys data.」（`lib/routes.js:39-43`）。
@@ -599,15 +613,19 @@ README 的「它做什么」只说「清理**不是删除**，搬进隔离区可
 
 **现在。** `planMove`、`planRestore`、`restoreBatch` 全部改为 `async` 并 `await` 谓词；`planRestore` 内新增默认绑定 `options.isInsideTrash ?? makeIsInsideTrash(options.layout ?? resolveLayout())`，守卫是 `if ((await isInsideTrash(target)) === true)`。默认绑定放在 `planRestore` 而不是各调用方，是为了让预览（`/trash/plan`）与执行（`/restore`）说同一件事——**一个与自己预览的操作不符的预览，比没有预览更糟**。修复后的位置：`planMove` 在 `lib/trash.js:246`，`planRestore` 在 `lib/restore.js:71`，`restoreBatch` 在 `lib/restore.js:151`，路由侧的 `await` 在 `lib/routes.js:590` 与 `lib/routes.js:614`。`lib/restore.js:57` 的参数类型也从同步的 `(path: string) => boolean` 改为 `(path: string) => Promise<boolean>|boolean`——**正是那个错误类型让错误写法看起来是对的**。
 
-**那个 `!== undefined` 前缀后来也被拆掉了。** 修 async 比较时，`planMove` 保留了 `options.isInsideTrash !== undefined && …` 的形状，而 `planRestore` 改成了自绑默认值——同一个仓库里两个孪生函数用两种纪律。前缀的含义是「调用方没给谓词」等于「不设防」，**这正是这个守卫当初能一直是死代码的原因**。现在 `planMove` 也自绑默认值（`lib/trash.js:262`，导入加了 `resolveLayout`），与 `deleteSessionItems` 里已有的整批绑定（`lib/trash.js:706`）同形。本仓库内没有实际行为变化——`deleteSessionItems` 本来就为整批绑一个谓词传下去——改的是这个形状本身：**不传谓词不再等于不设防**。
+> 上面这些「修复后的位置」是当时的值；§8.9 那一轮的改动移了行，今天是：`planMove` 绑定与守卫在 `lib/trash.js:275-276`，`planRestore` 在 `lib/restore.js:81` 与 `:146`，`restoreBatch` 在 `lib/restore.js:196`，`deleteSessionItems` 的整批绑定在 `lib/trash.js:792`。
+
+**那个 `!== undefined` 前缀后来也被拆掉了。** 修 async 比较时，`planMove` 保留了 `options.isInsideTrash !== undefined && …` 的形状，而 `planRestore` 改成了自绑默认值——同一个仓库里两个孪生函数用两种纪律。前缀的含义是「调用方没给谓词」等于「不设防」，**这正是这个守卫当初能一直是死代码的原因**。现在 `planMove` 也自绑默认值（`lib/trash.js:275`，导入加了 `resolveLayout`），与 `deleteSessionItems` 里已有的整批绑定（`lib/trash.js:792`）同形。本仓库内没有实际行为变化——`deleteSessionItems` 本来就为整批绑一个谓词传下去——改的是这个形状本身：**不传谓词不再等于不设防**。
 
 **代价。** 三个规划函数从同步变异步，波及它们的所有调用方。备选的「加一个同步版 canonicalizer」被否掉了：那会让同一份判断有两份实现，而这份文档存在的理由之一就是两份实现会悄悄分叉。
 
-### 8.7 `deleteSessionItems` 的注释与代码有一处小出入
+### 8.7 `deleteSessionItems` 的注释与代码有一处小出入 —— **已修复**
 
-注释说「if **nothing** moved, no manifest is written and the batch directory is removed again」（`lib/trash.js:677-679`）。代码里 `moveable.length === 0` 的早退发生在 `mkdirSync(batchDir, …)` **之前**（`lib/trash.js:763-780` 早退，`mkdirSync` 在 `lib/trash.js:787`）——所以不是「建了再删」，而是**根本不建**。行为更干净，注释略旧。
+注释说「if **nothing** moved, no manifest is written and the batch directory is removed again」。当时代码里 `moveable.length === 0` 的早退发生在 `mkdirSync(batchDir, …)` **之前**，所以不是「建了再删」，而是**根本不建**——行为更干净，注释略旧。
 
-（顺带一个容易看错的点：`lib/trash.js:618` 也有一处 `mkdirSync(batchDir, …)`，但那在另一个函数 `createBatch` 里，与本条无关。）
+**现在这句话是字面成立的（issue #1 那一轮改的）。** 目录先被 `claimBatchDir` 认领（`lib/trash.js:626-699`），`moveable.length === 0` 的早退再调 `releaseEmptyBatch`：**只有当这个目录是本次调用创建的**才 `rmdirSync` 删回去（`lib/trash.js:884-907`、`lib/trash.js:708-715`）。复用来的目录一律不动——它可能是别的操作正在填的批次，也可能是唯一记着某些条目来路的目录。`rmdirSync` 本身还要求目录为空，所以「删回一个已经有内容的目录」在系统调用层也不可能。
+
+（顺带一个容易看错的点：`createBatch`（`lib/trash.js:586-594`）里也有一处 `mkdirSync(batchDir, …)`（`lib/trash.js:592`），与本条无关；它按 instant 建目录，认领规则由 `claimBatchDir` 执行。）
 
 ### 8.8 分级与实际可执行能力之间有一处错位 —— **已修复**（本次最重要的发现）
 
@@ -643,6 +661,37 @@ restored      : 2 file(s) back at /tmp/dsh-reclaim-verify/cache/attachments/requ
 **代价与仍然不做的事。** `cacheBytes` 现在真的有通路了，所以 `totalReclaimableBytes` 里那一块不再高估；但**附件对象仍然一个都清不掉**（恒 `danger`）、未归类对象与 `report-only` 族也仍然只报告。附件要能清，先得让分级规则允许「零引用」的行存在，那是改判据而不是加通路，且必须同时重过 §2 的硬规则——**这条没做，也不该在补通路的这一轮里顺手做。** 另：`cacheBytes` 只统计 `cacheTiers.safe`，不含 `reportOnly` 族。
 
 这一条我按代码逐处核对过；如果上游的私库里有额外的写入通路（例如另一个包的 CLI），那它不在本仓库内。
+
+### 8.9 同一秒的多次移动共用一个批次目录并互相覆盖记录 —— **已修复**（issue #1 的根因）
+
+**原状：一次「清理」把同一秒里先移入的条目变成了孤儿。** 三个各自都不算错的机制叠在一起：
+
+- 批次目录名只有**秒**分辨率（`batchIdFor`，`lib/trash.js:105`），而 `deleteSessionItems` 直接拿 `batchDirFor(layout, instant)` 当目录用并 `mkdirSync(…, { recursive: true })`——**同名就共用，不管是不是同一次操作**；
+- 界面的「清理」是**逐会话各发一次** `POST /delete`（`lib/client.js` 的 `moveSessions` 用 `ids.forEach` 串行链），于是一屏里选中 N 个会话、同一秒内跑完的 N 次移动共用同一个批次目录；
+- 每次移动都 `writeManifest(batchDir, manifest)` **整份覆写**（修复前的 `lib/trash.js` 写入段）。后写的清单只记得自己那次移动的条目，**先移入的条目的 `originalPath` 就此消失**——那些文件还在批次目录里，但没有任何记录说它们从哪来。
+
+随后只要恢复或清空掉清单里还记着的那部分，`restoreBatch` 会在 `remaining.length === 0` 时把 `manifest.json` `unlinkSync` 掉（这条行为本身是对的：批次空了）。批次于是变成「有内容、无清单」。而 `planRestore` 当时读不到清单就**直接返回失败**（修复前的 `lib/restore.js:82-84`，`reason: 'the batch has no manifest'`），界面把三个计数都渲染成 0——用户看到的就是「成功 0、受阻 0、失败 0」。
+
+**这条规则其实写在注释里，只是从未实现。** `createBatch` 的 JSDoc 原话：「A new batch is only started when the caller asks for one with a distinct instant, or when the existing directory holds a manifest for a *different* session id.」而 `createBatch` 全库没有任何调用方，`deleteSessionItems` 走的是自己的 `mkdirSync`。**注释描述了有意的设计，代码没有执行它**——这是本条的起点，也是 §8.7 括号里那个「容易看错的 `mkdirSync`」真正的分量所在。
+
+**安全影响：没有字节被销毁，被销毁的是来路。** 受影响的是**同一秒内进入同一批次、且不是最后一批**的那些条目：它们对插件而言不再可还原，而本插件的全部承诺是「清理是搬动，不是删除」。这比一次普通的 bug 更严重，因为它破坏的正是这个承诺成立所依赖的那份记录。
+
+**现在，三条修复（各节详述）。**
+
+1. **批次目录按操作认领**（§4.6）：`claimBatchDir`（`lib/trash.js:626-699`）用「非 recursive 的 `mkdirSync` + `EEXIST` 即重试」认领 `<stamp>` / `<stamp>-2` / …，并且只复用**同一次操作**的目录（空目录，或清单的 `sessionIds` 认这个会话；说不清内容的目录一律跳过）。`createBatch` 注释里那条规则由此真正生效。
+2. **清单是并集**（§4.5）：写入改为 `mergeIntoManifest`（`lib/recover.js`），读回-合并-回读校验，**不再有「整份覆写」这条路径**。
+3. **无清单批次可被读回并还原**（§4.5、§4.7、§4.8）：`reconstructEntries` 从镜像布局推回 `originalPath`，`planRestore` / `restoreBatch` 据此工作并把记录落盘，`listBatches` / `describePurge` 据此报出真实项数。**用户报告里那批数据正是靠这一条救回来的**——它已经躺在隔离区里而且没有清单，除了从布局读回来，没有别的办法能知道那两个会话原本住在哪。
+
+**这一条有实测。** 新增 `test/batch-record.test.js`（6 条，`npm test` 共 41 条全绿）逐条钉住：
+
+- 同一秒、两个不同会话 → **两个**批次目录（`<stamp>` 与 `<stamp>-2`），两份清单各记各的；
+- 同一秒、同一会话的第二次移动 → 复用同一目录，清单条目数 **2**（不是 1）；
+- 同一秒、无 `sessionId` 的两次移动（`/clear` 的形状）→ 复用同一目录，两条 `originalPath` 都在；
+- 一个没有清单、但目录里有内容的旧批次 → 不被复用、不被写入，原样留着；
+- 没有清单的批次 → `planRestore` 报 `reconstructed: true` 且能分出 `pending` / `target-occupied`，`restoreBatch` 真的把文件放回原路径，并把重建的记录写回批次；下一次规划它是 `reconstructed: false`（记录已落盘，不再是推断）；
+- `listBatches` 对无清单批次报出**真实项数**、推断出的 `sessionIds` 与那句理由。
+
+**代价与仍然不做的事。** 批次目录名不再是操作的唯一标识：同一秒可以有 `<stamp>`、`<stamp>-2`…，所以**任何把批次名当成时间戳解析的调用方都要容忍后缀**。路由侧不需要改动——`resolveBatchDir`（`lib/routes.js:346-362`）只做包含性校验、不校验名字形状（这也正是加后缀可行的前提）；但 `listBatches` 按 `batchId` **字符串**降序排（`lib/purge.js:255`），同一秒的多个批次之间的先后因此不保证（跨秒仍然正确）。重建的已知局限见 §4.5：镜像不记录条目边界，顶层只有目录的条目会被拆成多块还原。
 
 ---
 
