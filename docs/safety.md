@@ -316,9 +316,12 @@ BATCH_SUBDIRS = { session: 'sessions', 'session-cache': 'session-caches',
 >
 > **重建的已知局限**：镜像不记录条目边界。一个自身顶层只有目录的条目，会被在更深一层拆成多块、分别还原到（还原时才创建的）原目录里，效果等价于把一棵树分块重建；条目自身的文件都回得来，中间目录的归属只是重新推断的。
 
+> **一次移动自己的记录优先于布局的猜测（issue #12 修复）。** 上面这条局限只属于「整批既没有清单、也没有任何一次移动的记录可依」的情形。移动本来就知道自己搬了什么：它写下的每一条 `isDirectory: true` 就是一次整目录搬运，所以合并重建时，落在这样一条目录**内部**的推断条目不再重复写进清单——还原那一条目录本来就会把内部的东西一并带回来，两条都留着会让一份没丢任何字节的批次报出「原路径已被占用」（`lib/recover.js` 的 `coveredByMove`，走的是 `lib/paths.js` 那道词法包含判断 `isUnder`；「request-images-old」这种只是前缀相同的兄弟不算「内部」）。反方向同样成立，而且是单文件清理里暴露出来的：只把一个文件搬出某个目录时，那个目录留在原地，重建会连它一起列成条目——用户顺手删掉这个被清空的目录再还原，这条幽灵条目就先还原，它自己的子条目随即报出同一句「原路径已出现」。所以作为本次移动**脚手架**而存在、位于移动条目上方的推断目录也不写入；但这一步是**证明而非假设**：该目录镜像子树下的每个文件都必须属于本次移动写下的某一条条目，只要有一个不属，这份布局就是那些文件唯一的记录，条目照旧保留（`listFilesUnder` 读不出来时同样不丢）。清单的 `reconstructed` 与那条 note 只在这份猜测**确实有内容留下**时才写：猜出来的条目全被移动记录覆盖时，清单就是这次移动的真实记录，不谎称自己推过布局（被覆盖的条数由 `mergeIntoManifest` 的 `coveredEntries` 报出）。
+> 已经落在盘上的、把「目录 + 它的子目录」各记一条的老清单**不改写**：还原它们时父目录先回位，子条目随后发现原路径被占，于是照旧报失败（字节本身都在，批次随后是空的、可清理）。读侧不替它们折叠：当父路径被占（例如用户重建了一个空的 `request-images/`）而子路径仍空时，折叠会把本来还能还原的子条目一起挡掉——那是把数据真的留在隔离区里。
+
 写入用**临时文件 + rename**，这样写到一半崩溃不会留下能解析成有效 manifest 的半成品（`lib/manifest.js:176-195`）。这是整个插件里唯一允许 rename 存在活目标的地方，因为 `renameSync` 的静默覆盖在这里正是需要的语义。
 
-**写清单是并集，不是覆盖（issue #1 修复之二）。** 一次移动不再 `writeManifest(batchDir, 新清单)` 整份盖掉旧记录，而是 `mergeIntoManifest(batchDir, candidate, { volumeRoot })`（`lib/recover.js`）：读回现有清单、按 `relativePath` 合并、再写，并在写后**回读校验**「本次要写的每一条都在里面」。理由是 §8.9 讲的那次事故：同一秒里的第二次移动把第一次的记录盖掉了，而那条记录是那些条目唯一的来路。另有一条硬规则：**两个批次若记着不同的 `volumeRoot`，合并被拒绝**（返回 `ok: false` + 理由）——把两个根的路径混进一份清单，等于写出一份自己都不知道指向哪里的记录。
+**写清单是并集，不是覆盖（issue #1 修复之二）。** 一次移动不再 `writeManifest(batchDir, 新清单)` 整份盖掉旧记录，而是 `mergeIntoManifest(batchDir, candidate, { volumeRoot })`（`lib/recover.js`）：读回现有清单、按 `relativePath` 合并、再写，并在写后**回读校验**「本次要写的每一条都在里面」。理由是 §8.9 讲的那次事故：同一秒里的第二次移动把第一次的记录盖掉了，而那条记录是那些条目唯一的来路。并集的另一半是**优先**：布局猜出来的条目若落在本次要写的某条目录条目内部（或反过来——本次移动的条目全在它内部、证明它只是脚手架，见上），就不再重复写入（issue #12 修复，见上；一次搬运一条记录）。另有一条硬规则：**两个批次若记着不同的 `volumeRoot`，合并被拒绝**（返回 `ok: false` + 理由）——把两个根的路径混进一份清单，等于写出一份自己都不知道指向哪里的记录。
 
 ### 4.6 「删除」执行时的失败规则
 
@@ -500,7 +503,7 @@ esac
 
 - `hasDshCachePath = typeof namespace.dshCachePath === 'function'`（`lib/paths.js:120`）；
 - 该导出在这台机器的构建上不存在，**签名不可观测**，所以防御性地试两种调用形状（`dshCachePath(join('attachments','request-images'))` 与 `dshCachePath()`），只接受绝对路径字符串（`lib/paths.js:125-150`）；
-- 返回值必须落在 `<home>/cache` 之下（`isUnder` 用 `path.relative` + 父级遍历检查，能挡住共享前缀的兄弟目录与盘符变化），否则**拒绝跟随**、降级 legacy 并记录 anomaly（`lib/paths.js:151-158`、`lib/paths.js:225-236`）；
+- 返回值必须落在 `<home>/cache` 之下（`isUnder` 用 `path.relative` + 父级遍历检查，能挡住共享前缀的兄弟目录与盘符变化），否则**拒绝跟随**、降级 legacy 并记录 anomaly（`lib/paths.js:151-158`、`lib/paths.js:223-238`）；
 - 两个候选的存在性总是作为证据报告；选中目录不存在而另一候选存在时也产 anomaly：「the stale one likely comes from a different host version; investigate before clearing」（`lib/paths.js:191-209`）；
 - 返回 `{selected, selectedPath, reason, dshCachePathExported, dshCachePathResolved, dshCachePathError, candidates, anomaly}`（`lib/paths.js:210-220`）。
 
@@ -693,7 +696,7 @@ restored      : 2 file(s) back at /tmp/dsh-reclaim-verify/cache/attachments/requ
 - 没有清单的批次 → `planRestore` 报 `reconstructed: true` 且能分出 `pending` / `target-occupied`，`restoreBatch` 真的把文件放回原路径，并把重建的记录写回批次；下一次规划它是 `reconstructed: false`（记录已落盘，不再是推断）；
 - `listBatches` 对无清单批次报出**真实项数**、推断出的 `sessionIds` 与那句理由。
 
-**代价与仍然不做的事。** 批次目录名不再是操作的唯一标识：同一秒可以有 `<stamp>`、`<stamp>-2`…，所以**任何把批次名当成时间戳解析的调用方都要容忍后缀**。路由侧不需要改动——`resolveBatchDir`（`lib/routes.js:346-362`）只做包含性校验、不校验名字形状（这也正是加后缀可行的前提）；但 `listBatches` 按 `batchId` **字符串**降序排（`lib/purge.js:255`），同一秒的多个批次之间的先后因此不保证（跨秒仍然正确）。重建的已知局限见 §4.5：镜像不记录条目边界，顶层只有目录的条目会被拆成多块还原。
+**代价与仍然不做的事。** 批次目录名不再是操作的唯一标识：同一秒可以有 `<stamp>`、`<stamp>-2`…，所以**任何把批次名当成时间戳解析的调用方都要容忍后缀**。路由侧不需要改动——`resolveBatchDir`（`lib/routes.js:346-362`）只做包含性校验、不校验名字形状（这也正是加后缀可行的前提）；但 `listBatches` 按 `batchId` **字符串**降序排（`lib/purge.js:255`），同一秒的多个批次之间的先后因此不保证（跨秒仍然正确）。重建的已知局限见 §4.5：镜像不记录条目边界，顶层只有目录的条目会被拆成多块还原；**一次移动自己的记录优先于这份猜测**（issue #12 修复，同样见 §4.5）——记着目录又记着它子目录的那种清单不再被写出来；同理，一次只搬走文件的清理也不再把它留守的目录记成条目（前提是该目录下的文件全部属于本次移动，见 §4.5）。
 
 ---
 
