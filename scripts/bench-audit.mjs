@@ -110,7 +110,27 @@ function describe(result) {
     // for, which is the number the panel shows beside the bin.
     archived: body.archived?.count ?? null,
     archivedKnown: typeof body.archived?.available === 'boolean' ? body.archived.available : null,
+    // What the badge beside each title would say, counted over the rows this
+    // response actually carried. `unknown` is a state, not a failure: it is the
+    // explicit third badge, and it must never be folded into `notArchived`.
+    rowsArchived: countArchived(body),
   }
+}
+
+/** The three badge states, counted over the report's own session rows. */
+function countArchived(body) {
+  const rows = Array.isArray(body.sessions) ? body.sessions : []
+  if (rows.length === 0) return null
+  let yes = 0
+  let no = 0
+  let unknown = 0
+  for (const row of rows) {
+    const value = row?.facts?.archived
+    if (value === true) yes += 1
+    else if (value === false) no += 1
+    else unknown += 1
+  }
+  return { rows: rows.length, archived: yes, notArchived: no, unknown }
 }
 
 /**
