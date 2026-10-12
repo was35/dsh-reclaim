@@ -67,6 +67,7 @@ const loaded = (() => {
     renderPanel: panel.renderPanel,
     classifyUrl: panel.classifyUrl,
     formatClock: panel.formatClock,
+    shouldRescanAfter: panel.shouldRescanAfter,
   }
 })()
 
@@ -449,4 +450,19 @@ test('only an explicit rescan asks the route to re-read the disk', () => {
 
   // Changing the risk dial re-grades facts already in memory; it never re-reads session logs.
   assert.doesNotMatch(loaded.classifyUrl(90), /rescan=1/)
+})
+
+test('a cached open is followed by a real read, and a cached dial change is not', () => {
+  const cached = { factsFromCache: true }
+  const fresh = { factsFromCache: false }
+
+  assert.equal(loaded.shouldRescanAfter(cached, 'open'), true, 'the open must not rest on a cached picture')
+  assert.equal(loaded.shouldRescanAfter(fresh, 'open'), false, 'a paint that was already a fresh read would scan twice')
+  // The rule `lib/config.js` records: "changing 30 → 7 is a re-grade of facts already in
+  // memory, never a rescan". Freshness cannot decide this — what asked for the answer does.
+  assert.equal(loaded.shouldRescanAfter(cached, 'threshold'), false, 'the risk dial re-read the disk')
+  assert.equal(loaded.shouldRescanAfter(fresh, 'threshold'), false)
+  // A failed request rendered nothing, so there is no picture to replace.
+  assert.equal(loaded.shouldRescanAfter(null, 'open'), false)
+  assert.equal(loaded.shouldRescanAfter(undefined, 'open'), false)
 })
