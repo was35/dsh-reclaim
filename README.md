@@ -60,8 +60,19 @@ curl -b <会话 cookie> http://127.0.0.1:<端口>/api/dsh-reclaim/health
 ## 支持的 DSH 版本
 
 > **DSH 处于 developer preview，官方 README 明确写着「THERE WILL BE COMPATIBILITY-BREAKING CHANGES」。**
-> 而且它**不强制检查**插件声明的兼容范围（`engines.dsh` / `dsh.manifestVersion` 官方原话是"仅作声明"，
-> 安装器与加载器都不校验）。所以：**装得上不等于跑得对**，声明范围只能当文档读。
+> 两个 manifest 字段的强制力**不一样，别混着读**：
+>
+> - **`engines.dsh` 在安装期被真检查。** `dsh plugin add` 会先跑 `evaluatePluginCompatibility`，不匹配就直接
+>   拒绝：`dsh: installation rejected: Plugin … is incompatible with dsh 0.2.1-rc.3: requirements
+>   {"engines.dsh":"…"} … dsh: nothing was installed.` 逃生舱是显式的逐版本豁免
+>   `dsh plugin allow-version <pkg@version> --dsh-version <exact> --accept-risk`（另有 `revoke-version` /
+>   `version-exemptions`），写进 profile 的兼容文件。宿主判定时带 `includePrerelease: true`，所以**范围写得再
+>   保守也挡不住预发布版**；反过来，范围写错也不会被宿主拦住，只会被默认语义的消费方（npm/pnpm 工具链、市场、
+>   第三方检查）判成不兼容——这正是下面这段范围必须逐 minor 串子句的原因。
+> - **`dsh.manifestVersion` 仍然只是声明。** 整个 0.2.1-rc.3 宿主树里没有任何代码读它（grep 零命中）。
+>
+> 所以：**装得上不等于跑得对**。宿主只保证它认的那条版本范围；范围之内的函数签名、服务形状、磁盘布局，仍然
+> 靠下面这张表和两层闭环来保证。
 
 | 支持的 DSH | 状态 | 说明 |
 |---|---|---|
@@ -69,7 +80,8 @@ curl -b <会话 cookie> http://127.0.0.1:<端口>/api/dsh-reclaim/health
 | `0.1.7-rc.1` | **已验证** | 独立 home + `0.1.7-rc.1` 的完整依赖树（277 个包）。能力探测 7/7 通过；该版本导出 `dshCachePath`，插件据此**自动改选**了新布局 `cache/attachments/request-images`；真实浏览器面板正常 |
 | `0.1.6-*` | **推断，未实测** | 位于两个已验证版本之间，故一并纳入范围；真要依赖它之前建议先验一遍 |
 | `0.2.0-rc.2` | **已验证** | 本仓库实测：隔离 home 里的 `web` profile 装上本插件，能力探测 **7 present / 0 missing**，`request-images` 解析到 `cache/attachments/request-images`，`dshCachePathExported: true`。`npm run test:host` 每次都会重跑并**断言**这三条（以前只是打印） |
-| `0.2.0-rc.2` **desktop 端** | **已验证到「不需要专门适配」** | 见下节。`npm run test:desktop` 把它做成了断言 |
+| `0.2.1-rc.3` | **已验证** | 本仓库实测（2026-10-25）：`npm test` 85/85；`npm run test:host` **7 present / 0 missing**；`npm run test:desktop` PASS；`scripts/bench-audit.sh` 在 204 个真实会话的只读副本上 PASS（其中 **78 条标题来自宿主投影缓存**，说明 `readTitleSnapshots` 与 `sessionController.list` 的 `{items}` 形状都还在）；客户端合并包正常（`__ModuleLoader__.load` 契约未变） |
+| `0.2.0-rc.2` / `0.2.1-rc.3` **desktop 端** | **已验证到「不需要专门适配」** | 见下节。`npm run test:desktop` 把它做成了断言 |
 
 ### desktop 端：结论是**没有 desktop 专属的东西需要适配**
 
@@ -77,30 +89,36 @@ curl -b <会话 cookie> http://127.0.0.1:<端口>/api/dsh-reclaim/health
 
 - **`desktop` profile 无法从任何命令行启动**，这是设计而不是缺陷。`@deepseek-ai/dsh/lib/bin.js:35-37` 的 `rejectElectronProfile`
   对 `--profile desktop` 无条件报错，而它在 profile action（`:112`）里**没有开关保护**；`manageDesktopProfile: true`
-  只解锁 `dsh plugin --profile desktop`（`:119`），不解锁启动。真正启动它的是 carrier——`dsh-desktop-host/lib/index.js:216`
-  的 `main()` 自己调 `runProfile`，绕过参数解析，并把 `--no-open --port 19387` **写死**。所以第二个 desktop 实例
-  必然和活着的那个抢端口，**任何隔离验证都不可能在真的 `desktop` profile 上做**。
-- **carrier 不是 profile 成员**，它从外面叠上去。所以 profile 的组成就是它自己声明的 bundle 列表——两个官方
-  bundle 打头，后面 13 个是第三方插件。
-- **这个插件需要的每个服务都由那两个官方 bundle 提供**：读活 desktop profile 合成出的 `cordis.yml`（330 条），
-  `sessions` / `attachments` / `sessionQuery` / `tools` / `connection.fetch` 的提供者分别是
-  `@deepseek-ai/dsh-session-persistence-jsonl`、`dsh-attachment-local`、`dsh-session-query-sqlite`、`dsh-tools`、
-  `dsh-client-connection`，**全部来自 `dsh-base` + `dsh-web-app`**，那 13 个第三方 bundle 一个都没参与。
+  只解锁 `dsh plugin --profile desktop`（`:119`），不解锁启动。真正启动它的是 carrier——`dsh-desktop-host/lib/index.js:226`
+  的 `main()` 自己调 `runProfile`，绕过参数解析，并把 `--no-open --port 19387` **写死**（`:235`）。所以第二个
+  desktop 实例必然和活着的那个抢端口，**任何隔离验证都不可能在真的 `desktop` profile 上做**。
+- **carrier 不是 profile 成员**，它从外面叠上去。所以 profile 的组成就是它自己声明的 bundle 列表：两个官方
+  bundle 打头，后面是 13 个第三方插件与 1 个官方按需 bundle（`@deepseek-ai/dsh-experimental-auto-review`，
+  在 `dsh.profile.bundles` 里但不在 `dependencies` 里）。
+- **这个插件需要的每个服务都由那两个官方 bundle 提供**。0.2.1 起合成树**不再落盘**：`cordis.yml` 只是一个
+  4 行注释加 `[]`，真正的树在启动时由 `dsh.profile.bundles` + 各 bundle 自带的 patch 现算。所以断言改成两步：
+  只读检查活 profile 的 `package.json`（bundle 列表头两项仍是那两个官方 bundle、carrier 不在列表里、用户层
+  `cordis.patch.yml` 只有按 id 的 config 覆写而**没有 `insert:`**），再在一次性 home 的克隆上用
+  `--dump-config` 把五个提供者逐个归到 `dsh-base` / `dsh-web-app`：
+  `sessions` → `@deepseek-ai/dsh-session-persistence-jsonl`、`attachments` → `dsh-attachment-local`、
+  `sessionQuery` → `dsh-session-query-sqlite`、`tools` → `dsh-tools`、`connection.fetch` → `dsh-client-connection`，
+  **那 13 个第三方 bundle 一个都没参与**。
 - **插件分不出两者**：`lib/` 里 `DSH_PROFILE` 与 `profileContext` 零命中，唯一读的环境变量是 `DSH_HOME`
   （`lib/paths.js:260-262`），而 desktop 与 web 用的是同一个 `~/.dsh`。它的全部世界观就是 home 目录。
 
-`npm run test:desktop` 因此做四件事：只读扫描活 desktop profile 的配置并断言上面第二、三条；断言 `lib/*.js`
-里除 `DSH_HOME` 外不读任何环境变量、也不提 profile 名（那就是第四条，多读一个变量就 FAIL，因为那会是一个
-可能在两端不同的新输入）；在一个从 `web` 模板克隆出来的一次性 home 里跑完整闭环；**前后比对活 desktop profile
-三个文件的 sha256**——最后这条是「没有污染全局环境」的断言，不是承诺。它默认保留那个 home
-（`/tmp/dsh-reclaim-desktop-verify`），可以继续用来验别的插件，并打印一条 `rm -rf` 供你随时完全清理。
+`npm run test:desktop` 因此做四件事：只读检查活 desktop profile 的 manifest 并断言上面第二、三条的前半；
+断言 `lib/*.js` 里除 `DSH_HOME` 外不读任何环境变量、也不提 profile 名（那就是第四条，多读一个变量就 FAIL，
+因为那会是一个可能在两端不同的新输入）；在一个从 `web` 模板克隆出来的一次性 home 里跑完整闭环，并用
+`--dump-config` 断言五个提供者的归属；**前后比对活 desktop profile 三个文件的 sha256**——最后这条是「没有污染
+全局环境」的断言，不是承诺。它默认保留那个 home（`/tmp/dsh-reclaim-desktop-verify`），可以继续用来验别的插件，
+并打印一条 `rm -rf` 供你随时完全清理。
 
 > 仍未做的：在 Electron 窗口里真的点一遍（见 [docs/safety.md](docs/safety.md) §9 第 10 条），以及那 13 个第三方
 > bundle 会不会影响本插件——它们不提供任何被依赖的服务，所以按当前证据不会，但那是从「提供者是谁」推出来的，
 > 不是实测出来的。
 
 > 版本范围的实现方式值得说明：**必须逐 minor 串 OR 子句**，
-> `>=0.1.5-rc.1 <0.3.0-0 || >=0.1.6-0 <0.1.7-0 || >=0.1.7-0 <0.1.8-0 || >=0.2.0-rc.1 <0.3.0-0`。
+> `>=0.1.5-rc.1 <0.3.0-0 || >=0.1.6-0 <0.1.7-0 || >=0.1.7-0 <0.1.8-0 || >=0.2.0-rc.1 <0.3.0-0 || >=0.2.1-rc.1 <0.3.0-0`。
 > `engines.dsh` 与 `peerDependencies` 里这段文本**逐字相同**，避免两者漂移。
 >
 > 用 `<0.2.0-0` / `<0.3.0-0` 而不是 `<0.2.0` / `<0.3.0`：prerelease 排序里数字标识符低于字母标识符，所以
@@ -122,15 +140,18 @@ curl -b <会话 cookie> http://127.0.0.1:<端口>/api/dsh-reclaim/health
   `0.1.6-rc.1`、`0.1.7-0`、`0.1.7-rc.1` 四版全部落空，而 `0.1.7-rc.1` 正是上面版本表里列为"已验证"的那一版。
   所以 `>=0.1.6-0 <0.1.7-0` 与 `>=0.1.7-0 <0.1.8-0` 现在显式写在范围里；`>=0.2.0-rc.1 <0.3.0-0` 也是同样的
   理由——`0.2.0-rc.*` 是 tuple 为 `0.2.0` 的预发布版，只有同 tuple 且带预发布标识的比较器才放行它。
+- **每出一个新 minor 就得手加一句，`0.2.1` 就是刚发生的例子。** `>=0.2.0-rc.1 <0.3.0-0` 管的是 tuple 为
+  `0.2.0` 的预发布版以及其后的稳定版；`0.2.1-rc.1` / `0.2.1-rc.3` 的 tuple 是 `0.2.1`，在**默认语义**下两版都是
+  `false`（实测）。宿主自己判定时带 `includePrerelease`，所以装是装得上的——但声明必须让默认语义的消费方也读出
+  同一个答案，于是范围里显式加上了 `>=0.2.1-rc.1 <0.3.0-0`。**这一条不会自动生效，下一个 minor 还得再来一次。**
+- 注意**每条都止于下一个 minor**：写成 `<0.2.0` 会按字面把 0.2.0 整条线排除在外，写成 `<0.3.0` 又会悄悄
+  囊括还没验证过的 `0.3.x`。
+- `@deepseek-ai/dsh-home-paths` 的 `latest` dist-tag **是过期的旧版本**（`0.0.1-rc.3`），无范围的安装会解析到
+  化石版本。
 
 装好之后，**一条请求就能看出当前宿主对不对得上**——`/health` 的 `capabilities` 字段逐项列出本插件依赖的
 宿主接口在不在（`ctx.effect`、`ctx.connection.fetch.register`、`ctx.get`，以及 `sessions` / `attachments` /
 `sessionQuery` / `tools` 四个服务），每项都写明**缺了会坏什么**。版本对不上时，这是最快的诊断入口。
-- 想表达多个 minor 的宿主，只能逐 minor 串 OR 子句，且**每出一个新 minor 要手加一句**：
-  `>=0.1.5-rc.1 <0.2.0-0 || >=0.2.0-rc.1 <0.3.0-0`。
-  注意**每条带止于下一个 minor**：写成 `<0.2.0` 会按字面把 0.2.0 整条线排除在外，
-  写成 `<0.3.0` 又会悄悄囊括还没验证过的 `0.3.x`。
-- `@deepseek-ai/dsh-home-paths` 的 `latest` dist-tag **是过期的旧版本**（`0.0.1-rc.3`），无范围的安装会解析到化石版本。
 
 **验证方法**（要加新版本时照做）：换 CLI **不够**——插件从自己的安装位置解析依赖，所以必须**同时**让插件拿到那个版本的依赖树（例如在一个独立的 home 里，用该版本的 CLI 启动，并把依赖树一并指向该版本）。判据不能只看"能不能起来"，要看**依赖层是否真的换了**：要读的判据是 **`families[<请求图片族>].layout.dshCachePathExported`**——顶层并没有 `layout` 对象，照旧写法取值只会拿到 `undefined` 并误判成「版本不符」（见 [docs/safety.md](docs/safety.md) §8.1）。它在 `0.1.5` 上应为 `false`、在 `0.1.6+` 上应为 `true`——如果与目标版本不符，说明插件拿到的仍是旧依赖，**这次验证不算数**。
 

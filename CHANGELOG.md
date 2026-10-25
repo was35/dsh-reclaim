@@ -6,8 +6,14 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **兼容范围补上 `0.2.1` 线。** `engines.dsh` 与 `peerDependencies` 里那段文本仍逐字相同，两处都在末尾加了 `|| >=0.2.1-rc.1 <0.3.0-0`。理由是实测出来的：`0.2.1-rc.1` / `0.2.1-rc.3` 的 tuple 是 `0.2.1`，而 `>=0.2.0-rc.1 <0.3.0-0` 在**默认语义**（不传 `includePrerelease`）下对它们都是 `false`——宿主自己判定时带 `includePrerelease: true`，所以装是装得上的，但 npm/pnpm 工具链、市场与第三方检查读到的是「不兼容」。补完之后默认语义下 `0.1.5-rc.1` / `0.1.6-0` / `0.1.6-rc.1` / `0.1.7-rc.1` / `0.1.7-rc.2` / `0.2.0-rc.1` / `0.2.0-rc.2` / `0.2.0` / `0.2.1-rc.1` / `0.2.1-rc.3` / `0.2.1` / `0.2.2` 全为 `true`，`0.1.8-rc.1` / `0.3.0-0` / `0.3.0-rc.1` / `0.3.0` / `1.0.0` 全为 `false`（`0.1.8-rc.1` 与改前一致，不构成回归）。**每出一个新 minor 都得再补一句，这一条不会自动生效。**
+- **README 与 `docs/safety.md` §7.4 更正了「宿主不校验兼容范围」这个说法。** 实测 `0.2.1-rc.3` 的 `dsh plugin add`：`engines.dsh` 不匹配时 `@deepseek-ai/dsh-plugin-manager` 的 preflight 直接 `rejected(preflight, "nothing was installed")`，报 `dsh: installation rejected: Plugin … is incompatible with dsh 0.2.1-rc.3: requirements {"engines.dsh":"…"} …`，逃生舱是逐版本豁免 `dsh plugin allow-version <pkg@version> --dsh-version <exact> --accept-risk`（配 `revoke-version` / `version-exemptions`）。**仍然纯声明的只有 `dsh.manifestVersion`**——整棵宿主树里没有任何代码读它（grep 零命中）。文档现在把两个字段分开写，并说明宿主判定带 `includePrerelease: true`、所以范围写错时不会被宿主拦住。
+
 ### Fixed
 
+- **`scripts/verify-desktop.sh` 的第 1/4 步不再读 `cordis.yml`**（[#13](https://github.com/was35/dsh-reclaim/issues/13)）。`0.2.1` 起合成树不再落盘——`cordis.yml` 只剩四行注释加 `[]`，宿主在启动时用 `dsh.profile.bundles` 加各 bundle 自带的 patch 现算——所以旧断言拿到的永远是 `Composed entries were: []`，`npm run test:desktop` 在第 1 步就红。现在这一步只读活 profile 的 manifest：bundle 列表头两项必须是 `dsh-base` / `dsh-web-app`，`dsh-desktop-host` 不能是成员，用户层 `cordis.patch.yml` 不能出现 `insert:`（它只有按 id 的 config 覆写，动不了提供者），并如实打印 `cordis.yml` 是不是空 stub。「五个服务由谁提供」挪到第 3 步：在从 `web` 模板克隆的一次性 home 上跑 `--dump-config`，按 `# == <bundle>` 分段把五个提供者逐个归到 `dsh-base` / `dsh-web-app`，缺一个或归到别的 bundle 都 FAIL。`sh scripts/verify-desktop.sh` 在 `0.2.1-rc.3` 上重跑通过（`providers: 5 attributed to dsh-base / dsh-web-app`，活 profile 三个文件 sha256 不变）。
 - **清掉一个缓存家族目录后，还原不再把它的子目录判成冲突**（[#12](https://github.com/was35/dsh-reclaim/issues/12)）。一次移动写下的清单本来就知道自己搬了什么——每条 `isDirectory: true` 就是一次整目录搬运——但清单缺失时走的重建分支会把「顶层只有目录」的条目在更深一层拆开，并集于是同时留下「目录」和「它的子目录」两条记录：还原时父目录先回位，子条目随后发现原路径被占（`lib/restore.js:219`），一批**没丢任何字节**的数据因此报 `ok: false`。现在合并重建时，落在本次要写的某条目录条目**内部**的推断条目不再重复写入（`lib/recover.js` 的 `coveredByMove`，走的是 `lib/paths.js` 那道词法包含判断 `isUnder`）——还原那条目录本来就会把内部的东西一并带回来。清单的 `reconstructed` 与那句 note 只在这份猜测确实有内容留下时才写，被覆盖的条数由 `mergeIntoManifest` 新增的 `coveredEntries` 报出。**已经落在盘上、把两份都记着的老清单不改写**：还原它们时「父目录先回位、子条目随后被拒」的判词照旧（字节本身都在，批次之后是空的、可清理）；读侧不替它们折叠，因为父路径被占（例如用户重建了一个空的 `request-images/`）而子路径仍空时，折叠会把本来还能还原的子条目留在隔离区里（`docs/safety.md` §4.5）。`npm run test:host` 第 5 步（`scripts/verify-clear.mjs`）随之从必红变为通过。
 - **只清掉一个文件时，清单不再把留守的那个目录也记成条目**（同 [#12](https://github.com/was35/dsh-reclaim/issues/12) 的另一半）。文件被搬走、目录留在原地，重建会连目录一起列出来；用户顺手删掉这个被清空的目录再还原时，这条**幽灵条目**先还原，它自己的子条目随即报出同一句「原路径已出现」，一批字节齐全的数据报 `ok: false`。现在位于本次移动条目**上方**、只作为脚手架存在的推断目录同样不写入——但这一步是证明而非假设：该目录镜像子树下的**每个**文件都必须属于本次移动写下的某条条目，只要有一个不属，这份布局就是那些文件唯一的记录，条目照旧保留（读不出来时同样不丢）。新增 `test/manifest-entry-boundary.test.js`（7 条）钉住两个方向与它们的边界（前缀相同的兄弟、未被覆盖的条目、被证明为脚手架的目录），`npm test` 78 → 85 条全绿。
 
@@ -42,7 +48,7 @@
 
 - 没有字节被销毁，也没有新增销毁路径。删除路径的前置检查照旧**强制重扫**（`lib/routes.js` 的 `factsFor(ctx, 'empty-refs', true, …)` 未动）；进程内缓存只服务读路径，且带 60 秒上界（`FACT_CACHE_TTL_MS`），落盘缓存仍被明确禁止。
 
-**已知的既有问题**（先于本版存在，已在 `a846987` 上复现，不影响本版的两条需求）：`npm run test:host` 第 5 步与 `npm run test:desktop` 第 1/4 步在 `main` 上失败，分别记为 [#12](https://github.com/was35/dsh-reclaim/issues/12)（清单把目录与其子目录各记一条，还原时子目录被拒；文件本身都回得来，失败的是批次判词——**已在 Unreleased 修复**）与 [#13](https://github.com/was35/dsh-reclaim/issues/13)（`verify-desktop.sh` 读的 `cordis.yml` 已不再承载组合项——**仍未修复**）。
+**已知的既有问题**（先于本版存在，已在 `a846987` 上复现，不影响本版的两条需求）：`npm run test:host` 第 5 步与 `npm run test:desktop` 第 1/4 步在 `main` 上失败，分别记为 [#12](https://github.com/was35/dsh-reclaim/issues/12)（清单把目录与其子目录各记一条，还原时子目录被拒；文件本身都回得来，失败的是批次判词——**已在 Unreleased 修复**）与 [#13](https://github.com/was35/dsh-reclaim/issues/13)（`verify-desktop.sh` 读的 `cordis.yml` 已不再承载组合项——**已在 Unreleased 修复**）。
 
 ## [0.2.1] - 2026-10-11
 
