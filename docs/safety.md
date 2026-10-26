@@ -31,7 +31,7 @@ TIERS = ['danger', 'confirm', 'safe', 'unclassified']
 
 > **上面这一栏说的是会话档位卡片。缓存/附件有第二张卡片（`lib/client.js` 的 `renderClearables`），规则不同：`tier === 'safe' && batchClearable === true` 才给可用复选框，其余一律给禁用复选框加原因。** 差别在于「仍要清理…」是一个**替代动作**（按族确认后整族搬走），而没被枚举的缓存族没有替代动作可提供，所以诚实的形状是原因写在旁边、控件不动。见 §8.8。
 
-> **还有第五类，但它不是档位。** `file-objects` 与 `files` 两个附件族被放进 `reportOnly` 分组（`lib/classification-report.js:39`、`lib/classification-report.js:412-430`），行的 `tier` 写作 `'reportOnly'`（`lib/classification-report.js:417`），**不在 `TIERS` 里**，也不进 `totals.tiers.caches` 的计数（`lib/classification-report.js:523-524`）。它们只被量了大小，不提供任何清理条款。
+> **关于 `file-objects` 与 `files` 附件族：** 在之前版本中因缺乏样本暂列为 `reportOnly`；现已确认二者为 content-addressed 内容文件与文件名别名硬链接对。两族已解除 `reportOnly` 限制，通过 `indexAttachmentsOnDisk` 聚合成同一附件对象并统计物理字节。在引用图谱完整且零引用（或引用会话已被彻底删除）时，被正确评级为 `safe` 并提供勾选清理，清理时双硬链接协同移入隔离区 `trash/attachments/`，并支持字节对齐完整还原。
 
 ### 1.2 会话
 
@@ -474,7 +474,7 @@ esac
 | 边界 | 后果 | 依据 |
 |---|---|---|
 | 投影缓存按**默认** storage-json 布局判定 | 宿主若迁移过 `storage-json.root`，孤儿缓存检测**不覆盖**（storage 服务不暴露根路径） | `lib/caches.js:39-42` |
-| `file-objects` / `files` 两族只报告 | 没有清理条款，因为「尚无真实样本可定规则」 | `lib/attachments.js:43`、`lib/classify.js:89` |
+| `file-objects` / `files` 两族已接入引用图谱 | 零引用孤儿可安全清理，双硬链接协同移入隔离区与恢复 | `lib/classification-report.js`、`lib/clear-objects.js` |
 | 归属未定义的族外对象 | 恒 `danger`，不提供清理 | `lib/classify.js:403-421` |
 | 附件族只校验有官方文档的形状 | `request-images` 刻意不校验（键是请求变体身份而非内容摘要） | `lib/attachments.js:56-61` |
 | 目录深度上限 12 | 更深的子树记为 `uncertain`，且**排除**在族总数之外 | `lib/attachments.js:46`、`lib/attachments.js:93-159` |
@@ -668,7 +668,7 @@ restored      : 2 file(s) back at /tmp/dsh-reclaim-verify/cache/attachments/requ
 
 **为什么这一条不能在单元层证明。** 缓存族只有在 `checkAttachmentBackend`（`lib/backend-check.js`）确认已挂载的 store 是宿主文件支撑、且根在这次扫描的树里时才枚举；单元层把 `@deepseek-ai/dsh-home-paths` 换成了替身，那里什么都不枚举，每一行都是 `unclassified`。**只有真宿主能造出可清理的行，因此也只有真宿主能证明清得掉、还原得回来。**
 
-**代价与仍然不做的事。** `cacheBytes` 现在真的有通路了，所以 `totalReclaimableBytes` 里那一块不再高估；但**附件对象仍然一个都清不掉**（恒 `danger`）、未归类对象与 `report-only` 族也仍然只报告。附件要能清，先得让分级规则允许「零引用」的行存在，那是改判据而不是加通路，且必须同时重过 §2 的硬规则——**这条没做，也不该在补通路的这一轮里顺手做。** 另：`cacheBytes` 只统计 `cacheTiers.safe`，不含 `reportOnly` 族。
+**代价与仍然不做的事。** `cacheBytes` 与零引用 `attachmentBytes` 现在均具备完整通路，`totalReclaimableBytes` 精准统计真实释放空间。零引用孤儿附件（`sessionIds: []`）在引用图谱完整时可进 `safe` 并提供勾选清理，而仍被现存会话引用的附件行维持 `danger` 绝不误删。未归类对象（`unknown`）维持只报告原则。
 
 这一条我按代码逐处核对过；如果上游的私库里有额外的写入通路（例如另一个包的 CLI），那它不在本仓库内。
 

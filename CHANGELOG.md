@@ -6,6 +6,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- **支持普通文件附件（`files` / `file-objects`）与孤儿附件清理与恢复。**
+  - 解除了 `files` 与 `file-objects` 的 `REPORT_ONLY_FAMILIES` 限制，两族正式接入附件引用图谱与批量清理流水线。
+  - `indexAttachmentsOnDisk` 升级支持 2 级（`file-objects/<shard>/<hash>`、`objects/<shard>/<hash>`）与 3 级（`files/<shard>/<hash>/<name>`）路径，按 content id 聚合同一附件的所有实体与硬链接，并在卡片上呈现原始文件名与真实物理大小（避免重复计算硬链接字节）。
+  - 在引用图谱完整且孤儿门禁开启时，零引用（或所属会话已全被删除）的孤儿附件被正确评级为 `safe` 与 `batchClearable: true`，支持通过既有 `/clear` 通路安全移入隔离区（`trash/.../attachments/`）并可完整还原。
+  - 新增 `test/file-attachments.test.js`（3 条集成测试），单元测试从 85 条扩展至 88 条全绿。
+
 ### Changed
 
 - **兼容范围补上 `0.2.1` 线。** `engines.dsh` 与 `peerDependencies` 里那段文本仍逐字相同，两处都在末尾加了 `|| >=0.2.1-rc.1 <0.3.0-0`。理由是实测出来的：`0.2.1-rc.1` / `0.2.1-rc.3` 的 tuple 是 `0.2.1`，而 `>=0.2.0-rc.1 <0.3.0-0` 在**默认语义**（不传 `includePrerelease`）下对它们都是 `false`——宿主自己判定时带 `includePrerelease: true`，所以装是装得上的，但 npm/pnpm 工具链、市场与第三方检查读到的是「不兼容」。补完之后默认语义下 `0.1.5-rc.1` / `0.1.6-0` / `0.1.6-rc.1` / `0.1.7-rc.1` / `0.1.7-rc.2` / `0.2.0-rc.1` / `0.2.0-rc.2` / `0.2.0` / `0.2.1-rc.1` / `0.2.1-rc.3` / `0.2.1` / `0.2.2` 全为 `true`，`0.1.8-rc.1` / `0.3.0-0` / `0.3.0-rc.1` / `0.3.0` / `1.0.0` 全为 `false`（`0.1.8-rc.1` 与改前一致，不构成回归）。**每出一个新 minor 都得再补一句，这一条不会自动生效。**
