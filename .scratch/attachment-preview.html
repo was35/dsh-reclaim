@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>清理面板 · 上传文件预览原型</title>
+<style>
+  :root{
+    --bg:#131519; --card:#1c1f24; --line:rgba(255,255,255,.09); --text:#e7e9ec;
+    --muted:#969da6; --faint:#6f7680; --accent:#5b8def; --warn:#c98a2e;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font:13px/1.5 -apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB",sans-serif;padding:26px 30px 40px}
+  h1{font-size:17px;margin:0 0 6px;font-weight:600}
+  .sub{margin:0 0 14px;color:var(--muted);font-size:12px;max-width:900px}
+  h2{font-size:13px;font-weight:600;margin:0 0 6px}
+  .hint{font-size:11.5px;color:var(--faint);margin:0 0 10px}
+  .panel{background:var(--card);border:.5px solid var(--line);border-radius:12px;padding:8px 14px;max-width:760px}
+  .row{display:flex;flex-direction:column;gap:3px;padding:7px 0;border-top:.5px solid rgba(255,255,255,.06)}
+  .panel>.row:first-child{border-top:0}
+  .row-head{display:flex;gap:8px;align-items:baseline}
+  .check{width:13px;height:13px;border:.5px solid var(--faint);border-radius:3px;flex:none;margin-top:1px}
+  .row-title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:340px}
+  .row-time{margin-left:auto;color:var(--faint);font-size:11.5px;white-space:nowrap}
+  .row-id{font-family:var(--mono);font-size:10.5px;color:var(--faint);padding-left:21px}
+  .metrics{display:flex;flex-wrap:wrap;align-items:center;gap:10px;color:var(--muted);font-size:11.5px;padding-left:21px}
+  .badge{font-size:11px;border:.5px solid var(--line);border-radius:5px;padding:0 6px;color:var(--muted);white-space:nowrap}
+  .badge.archived{color:var(--accent);border-color:var(--accent);font-weight:600}
+  .badge.live{color:var(--warn);border-color:var(--warn);font-weight:600}
+  .files-toggle{display:inline-flex;align-items:center;gap:5px;border:.5px solid var(--line);background:transparent;color:var(--accent);font:inherit;font-size:11.5px;border-radius:6px;padding:1px 7px;cursor:pointer}
+  .files-toggle:hover{background:rgba(91,141,239,.08)}
+  .files-toggle .chev{color:var(--faint);font-size:10px}
+  .files{margin:2px 0 2px 21px;padding:7px 10px;border-left:2px solid rgba(91,141,239,.35);background:rgba(255,255,255,.02);border-radius:0 6px 6px 0;display:flex;flex-direction:column;gap:1px}
+  .files-head{display:flex;gap:8px;color:var(--muted);font-size:11px;margin-bottom:3px}
+  .files-head .warn{color:var(--warn)}
+  .file{display:flex;gap:10px;align-items:baseline;font-size:11.5px;padding:1.5px 0}
+  .file-name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:250px}
+  .file-size{margin-left:auto;color:var(--faint);font-variant-numeric:tabular-nums;white-space:nowrap}
+  .file-path{font-family:var(--mono);font-size:10.5px;color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .note{font-size:11px;color:var(--warn);margin-top:5px}
+  .note.muted{color:var(--faint)}
+  .more{align-self:flex-start;margin-top:3px;border:.5px dashed var(--line);background:transparent;color:var(--muted);font:inherit;font-size:11px;border-radius:6px;padding:1px 8px;cursor:pointer}
+  .empty{padding:5px 0 3px;color:var(--muted);font-size:11.5px}
+  .empty b{color:var(--text);font-weight:500}
+  .row.clickable{cursor:pointer;border-radius:6px}
+  .row.clickable:hover{background:rgba(255,255,255,.035)}
+  .row.clickable:focus-visible{outline:1.5px solid var(--accent);outline-offset:2px}
+  .row.clickable .check{cursor:default}
+  .footnote{margin-top:9px;color:var(--faint);font-size:11px;max-width:760px}
+  .legend{display:flex;gap:14px;align-items:center;color:var(--faint);font-size:11.5px;margin:0 0 14px;flex-wrap:wrap}
+  .legend b{color:var(--muted);font-weight:500}
+  .hidden{display:none}
+</style>
+</head>
+<body>
+<h1>清理面板 · 本会话可清理的上传文件预览</h1>
+<p class="sub">只读预览：只列 <code>files/</code> + <code>file-objects/</code>、且仅被本会话引用的附件，按内容 id 去重（双硬链接只算一次）。<code>objects/</code> 图片不列，仍只保留指标行里的张数。</p>
+
+<div class="legend">
+  <b>待定</b><span>A · 指标行末端披露按钮</span><span>B · 整行可点</span><span>同一份展开内容，只差入口</span>
+</div>
+
+<section id="panel-a">
+  <h2>方案 A · 指标行末端披露按钮</h2>
+  <p class="hint">显式按钮，键盘可达，与复选框互不干扰；展开内容缩进挂在指标行下方。</p>
+  <div class="panel">
+    <div class="row">
+      <div class="row-head">
+        <span class="check"></span>
+        <span class="row-title">Refactor the export pipeline</span>
+        <span class="badge archived">已归档</span>
+        <span class="row-time">22.4 天未活动</span>
+      </div>
+      <div class="row-id">session-4b5898c7</div>
+      <div class="metrics">
+        <span>0 张图片</span><span>会话 1.1 MB</span><span>删掉可释放 1.1 MB</span><span>共享未释放 0 张</span>
+        <button class="files-toggle" aria-expanded="true" aria-controls="a-files-1" data-target="a-files-1"><span class="chev">▾</span>上传文件 3</button>
+      </div>
+      <div class="files" id="a-files-1">
+        <div class="files-head"><span>3 个独占上传文件（不含图片）</span><span>共 962 KB</span></div>
+        <div class="file"><span class="file-name">2026-Q3-预算表.xlsx</span><span class="file-size">640 KB</span></div>
+        <div class="file-path">files/ab/9f2c1d8e…/2026-Q3-预算表.xlsx</div>
+        <div class="file"><span class="file-name">导出管线-说明.md</span><span class="file-size">12 KB</span></div>
+        <div class="file-path">files/1d/77e0aa31…/导出管线-说明.md</div>
+        <div class="file"><span class="file-name">screenshot-2026-10-21.png</span><span class="file-size">310 KB</span></div>
+        <div class="file-path">files/c4/02aae5c9…/screenshot-2026-10-21.png</div>
+        <div class="note">删掉这个会话后，这些文件先变成「需确认」的级联行，仍需再确认清理；本清单只作预览。</div>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="row-head">
+        <span class="check"></span>
+        <span class="row-title">Weekly triage</span>
+        <span class="badge live">正在使用</span>
+        <span class="row-time">刚刚</span>
+      </div>
+      <div class="row-id">session-e02f1a90</div>
+      <div class="metrics">
+        <span>0 张图片</span><span>会话 84 KB</span><span>删掉可释放 84 KB</span><span>共享未释放 0 张</span>
+        <button class="files-toggle" aria-expanded="true" aria-controls="a-files-2" data-target="a-files-2"><span class="chev">▾</span>上传文件 1</button>
+      </div>
+      <div class="files" id="a-files-2">
+        <div class="files-head"><span>1 个独占上传文件（不含图片）</span><span>共 84 KB</span></div>
+        <div class="file"><span class="file-name">会话纪要-10-26.docx</span><span class="file-size">84 KB</span></div>
+        <div class="file-path">files/3e/5b77c2d0…/会话纪要-10-26.docx</div>
+        <div class="note muted">正在使用，不可删；预览照给。</div>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="row-head">
+        <span class="check"></span>
+        <span class="row-title">Old sync log</span>
+        <span class="row-time">180.2 天未活动</span>
+      </div>
+      <div class="row-id">session-77c0de12</div>
+      <div class="metrics">
+        <span>0 张图片</span><span>会话 0.4 MB</span><span>删掉可释放 0 B</span><span>共享未释放 2 张</span>
+        <button class="files-toggle" aria-expanded="true" aria-controls="a-files-3" data-target="a-files-3"><span class="chev">▾</span>上传文件 0</button>
+      </div>
+      <div class="files" id="a-files-3">
+        <div class="empty"><b>本会话没有独占的上传文件。</b><br>共享未释放 2 张：这 2 个附件仍被其他会话引用，清理不会释放它们。</div>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="row-head">
+        <span class="check"></span>
+        <span class="row-title">2025 全年归档</span>
+        <span class="row-time">310.0 天未活动</span>
+      </div>
+      <div class="row-id">session-c0ffee42</div>
+      <div class="metrics">
+        <span>12 张图片</span><span>会话 41.2 MB</span><span>删掉可释放 41.2 MB</span><span>共享未释放 0 张</span>
+        <button class="files-toggle" aria-expanded="true" aria-controls="a-files-4" data-target="a-files-4"><span class="chev">▾</span>上传文件 200</button>
+      </div>
+      <div class="files" id="a-files-4">
+        <div class="files-head"><span>200 个独占上传文件（不含图片）</span><span>共 41.2 MB</span></div>
+        <div class="file"><span class="file-name">年报草稿-v9.docx</span><span class="file-size">8.4 MB</span></div>
+        <div class="file-path">files/91/0d3f…/年报草稿-v9.docx</div>
+        <div class="file"><span class="file-name">供应商清单.xlsx</span><span class="file-size">6.1 MB</span></div>
+        <div class="file-path">files/2a/77c1…/供应商清单.xlsx</div>
+        <div class="file"><span class="file-name">合同扫描件.pdf</span><span class="file-size">5.8 MB</span></div>
+        <div class="file-path">files/5c/ee02…/合同扫描件.pdf</div>
+        <div class="file"><span class="file-name">2025-12-月度纪要.docx</span><span class="file-size">3.2 MB</span></div>
+        <div class="file-path">files/8b/1a4d…/2025-12-月度纪要.docx</div>
+        <div class="file"><span class="file-name">预算修正案.xlsx</span><span class="file-size">2.9 MB</span></div>
+        <div class="file-path">files/33/9f20…/预算修正案.xlsx</div>
+        <button class="more" aria-expanded="false">还有 195 个（按大小降序，先列 5 个）</button>
+      </div>
+    </div>
+  </div>
+  <p class="footnote">已是孤儿的附件不属于任何会话行，不会出现在这里；它们只会在「需确认」分级里出现。<br>“图片”指标只数 <code>objects/</code>；<code>files/</code> 里的 png 属于上传文件，不计入张数——展开头里写明“不含图片”避免误读。</p>
+</section>
+
+<section id="panel-b">
+  <h2>方案 B · 整行可点</h2>
+  <p class="hint">整行（含指标行）可点；复选框、标题、评审按钮必须 stopPropagation，否则勾选会误触展开。</p>
+  <div class="panel">
+    <div class="row clickable" tabindex="0" aria-expanded="false">
+      <div class="row-head">
+        <span class="check"></span>
+        <span class="row-title">Refactor the export pipeline</span>
+        <span class="badge archived">已归档</span>
+        <span class="row-time">22.4 天未活动</span>
+      </div>
+      <div class="row-id">session-4b5898c7</div>
+      <div class="metrics">
+        <span>0 张图片</span><span>会话 1.1 MB</span><span>删掉可释放 1.1 MB</span><span>共享未释放 0 张</span>
+        <span style="color:var(--accent)">▸ 点任意处展开上传文件 3</span>
+      </div>
+      <div class="files hidden" id="b-files-1">
+        <div class="files-head"><span>3 个独占上传文件（不含图片）</span><span>共 962 KB</span></div>
+        <div class="file"><span class="file-name">2026-Q3-预算表.xlsx</span><span class="file-size">640 KB</span></div>
+        <div class="file-path">files/ab/9f2c1d8e…/2026-Q3-预算表.xlsx</div>
+        <div class="file"><span class="file-name">导出管线-说明.md</span><span class="file-size">12 KB</span></div>
+        <div class="file-path">files/1d/77e0aa31…/导出管线-说明.md</div>
+        <div class="file"><span class="file-name">screenshot-2026-10-21.png</span><span class="file-size">310 KB</span></div>
+        <div class="file-path">files/c4/02aae5c9…/screenshot-2026-10-21.png</div>
+        <div class="note">删掉这个会话后，这些文件先变成「需确认」的级联行，仍需再确认清理；本清单只作预览。</div>
+      </div>
+    </div>
+
+    <div class="row clickable" tabindex="0" aria-expanded="true">
+      <div class="row-head">
+        <span class="check"></span>
+        <span class="row-title">Weekly triage</span>
+        <span class="badge live">正在使用</span>
+        <span class="row-time">刚刚</span>
+      </div>
+      <div class="row-id">session-e02f1a90</div>
+      <div class="metrics">
+        <span>0 张图片</span><span>会话 84 KB</span><span>删掉可释放 84 KB</span><span>共享未释放 0 张</span>
+      </div>
+      <div class="files" id="b-files-2">
+        <div class="files-head"><span>1 个独占上传文件（不含图片）</span><span>共 84 KB</span></div>
+        <div class="file"><span class="file-name">会话纪要-10-26.docx</span><span class="file-size">84 KB</span></div>
+        <div class="file-path">files/3e/5b77c2d0…/会话纪要-10-26.docx</div>
+        <div class="note muted">正在使用，不可删；预览照给。</div>
+      </div>
+    </div>
+  </div>
+  <p class="footnote">隐患：整行可点把“勾选会话”与“展开预览”变成邻接操作；行内已有复选框、标题、评审按钮，需要逐个 stopPropagation，live 行和长列表下更容易误触。</p>
+</section>
+
+<script>
+  var only = new URLSearchParams(location.search).get('panel')
+  if (only === 'a') document.getElementById('panel-b').classList.add('hidden')
+  if (only === 'b') document.getElementById('panel-a').classList.add('hidden')
+
+  document.querySelectorAll('.files-toggle').forEach(function (btn) {
+    btn.addEventListener('click', function (event) {
+      event.stopPropagation()
+      var box = document.getElementById(btn.dataset.target)
+      var open = box.hidden
+      box.hidden = !open
+      btn.setAttribute('aria-expanded', String(open))
+      btn.querySelector('.chev').textContent = open ? '▾' : '▸'
+    })
+  })
+  document.querySelectorAll('.row.clickable').forEach(function (row) {
+    row.addEventListener('click', function (event) {
+      if (event.target.closest('.check, .row-title, button')) return
+      var box = row.querySelector('.files')
+      if (!box) return
+      box.classList.toggle('hidden')
+      row.setAttribute('aria-expanded', String(!box.classList.contains('hidden')))
+    })
+    row.addEventListener('keydown', function (event) {
+      if (event.key !== 'Enter' && event.key !== ' ') return
+      event.preventDefault()
+      var box = row.querySelector('.files')
+      if (!box) return
+      box.classList.toggle('hidden')
+      row.setAttribute('aria-expanded', String(!box.classList.contains('hidden')))
+    })
+  })
+  document.querySelectorAll('.more').forEach(function (btn) {
+    btn.addEventListener('click', function (event) {
+      event.stopPropagation()
+      var open = btn.getAttribute('aria-expanded') === 'true'
+      btn.setAttribute('aria-expanded', String(!open))
+      btn.textContent = open ? '还有 195 个（按大小降序，先列 5 个）' : '收起'
+    })
+  })
+</script>
+</body>
+</html>
