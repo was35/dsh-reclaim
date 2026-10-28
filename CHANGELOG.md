@@ -13,11 +13,16 @@
   - `indexAttachmentsOnDisk` 升级支持 2 级（`file-objects/<shard>/<hash>`、`objects/<shard>/<hash>`）与 3 级（`files/<shard>/<hash>/<name>`）路径，按 content id 聚合同一附件的所有实体与硬链接，并在卡片上呈现原始文件名与真实物理大小（避免重复计算硬链接字节）。
   - 在引用图谱完整且孤儿门禁开启时，零引用（或所属会话已全被删除）的孤儿附件被正确评级为 `safe` 与 `batchClearable: true`，支持通过既有 `/clear` 通路安全移入隔离区（`trash/.../attachments/`）并可完整还原。
   - 新增 `test/file-attachments.test.js`（3 条集成测试），单元测试从 85 条扩展至 88 条全绿。
+- **清理前可以预览本会话将释放的上传文件清单。** 会话行的指标行末尾多了一个「上传文件 N」披露按钮（`data-dshr-uploads-toggle`），展开后按大小降序列出该会话**独占**的 `files` / `file-objects` 文件：文件名、大小、相对附件根目录的路径（`files/<shard>/<id>/<name>`），绝对路径只作 `title` tooltip、不上屏；先显示 5 个，其余折叠成「还有 N 个」并可展开。共享给其他会话的附件只计入「共享未释放 N 张」而不列出（删任何一个会话都释放不了它的字节），图片仍由原有的「N 张图片」统计，正在使用（`running` / `idle-live`）的会话也照样预览并注明不可删。**清单只作预览**：删掉会话后这些文件先变成「需确认」的级联行，清掉它们仍需再确认一次——这段文字就写在清单底部，避免把预览读成删除承诺。
+  - 服务端随附件行下发 `facts.families`（数组形式，`lib/classification-report.js` 的 `row.facts.families = [...diskEntry.families]`），面板才知道该行属于 `files` / `file-objects` / `objects` 中的哪一族，而不必从路径形状反推。
+  - 面板侧新增 `uploadsBySession` / `uploadBytes` / `uploadName` / `uploadRelative` / `uploadKey`（`lib/client.js`），把「会话 id 带不带 `session-` 前缀」统一折叠成一个键——两半对 id 的拼写并不一致，不折叠会让附件从引用它的会话里消失。
+  - 新增 9 条断言（`test/client-panel.test.js` 8 条、`test/file-attachments.test.js` 1 条），`npm test` 96 条全绿。
 
 ### Changed
 
 - **兼容范围补上 `0.2.1` 线。** `engines.dsh` 与 `peerDependencies` 里那段文本仍逐字相同，两处都在末尾加了 `|| >=0.2.1-rc.1 <0.3.0-0`。理由是实测出来的：`0.2.1-rc.1` / `0.2.1-rc.3` 的 tuple 是 `0.2.1`，而 `>=0.2.0-rc.1 <0.3.0-0` 在**默认语义**（不传 `includePrerelease`）下对它们都是 `false`——宿主自己判定时带 `includePrerelease: true`，所以装是装得上的，但 npm/pnpm 工具链、市场与第三方检查读到的是「不兼容」。补完之后默认语义下 `0.1.5-rc.1` / `0.1.6-0` / `0.1.6-rc.1` / `0.1.7-rc.1` / `0.1.7-rc.2` / `0.2.0-rc.1` / `0.2.0-rc.2` / `0.2.0` / `0.2.1-rc.1` / `0.2.1-rc.3` / `0.2.1` / `0.2.2` 全为 `true`，`0.1.8-rc.1` / `0.3.0-0` / `0.3.0-rc.1` / `0.3.0` / `1.0.0` 全为 `false`（`0.1.8-rc.1` 与改前一致，不构成回归）。**每出一个新 minor 都得再补一句，这一条不会自动生效。**
 - **README 与 `docs/safety.md` §7.4 更正了「宿主不校验兼容范围」这个说法。** 实测 `0.2.1-rc.3` 的 `dsh plugin add`：`engines.dsh` 不匹配时 `@deepseek-ai/dsh-plugin-manager` 的 preflight 直接 `rejected(preflight, "nothing was installed")`，报 `dsh: installation rejected: Plugin … is incompatible with dsh 0.2.1-rc.3: requirements {"engines.dsh":"…"} …`，逃生舱是逐版本豁免 `dsh plugin allow-version <pkg@version> --dsh-version <exact> --accept-risk`（配 `revoke-version` / `version-exemptions`）。**仍然纯声明的只有 `dsh.manifestVersion`**——整棵宿主树里没有任何代码读它（grep 零命中）。文档现在把两个字段分开写，并说明宿主判定带 `includePrerelease: true`、所以范围写错时不会被宿主拦住。
+- **更正了「宿主没有 unarchive」这个前提，`dangling` 归档 id 的处置不变**（[#14](https://github.com/was35/dsh-reclaim/issues/14)）。本仓库此前在注释与文档里断言 `the official API has no unarchive operation`（改前在 `lib/workspace-sync.js:11-15`、`lib/sessions.js:140-142`、`lib/delete-session.js:504-506`，以及 `docs/safety.md` §6.3 边界表与 §9 第 7 条）。实测 `0.2.1-rc.3` 的宿主 `app.asar`：`workspaceController` 服务确有 `workspace/unarchiveSession`（入参 `{ sessionId }`，返回 `{ archivedSessionIds }`），与 `workspace/archiveSession` 成对。**行为没有变**：归档集合是注册表全局的记账，本仓库不去改写另一个组件的存储，所以删掉已归档会话后那条 id 仍然留作 `dangling`、只报告不修复——变的只是理由，从「API 不存在」改成「不替别人动它的账」。据此关闭 #14（现象：`@michengai/dsh-archive-manager` 把该 id 渲染成一条读失败），修复归属在那个组件或宿主，不在本仓库。
 
 ### Fixed
 

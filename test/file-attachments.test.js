@@ -100,6 +100,9 @@ test('an unreferenced file attachment on disk is graded safe and batchClearable'
   assert.equal(row.batchClearable, true)
   assert.equal(row.facts.name, 'contract.docx')
   assert.deepEqual(row.facts.paths.sort(), [fileObjPath, filesPath].sort())
+  // The families travel with the row as an array, not as the internal Set (a Set serialises
+  // to `{}` on the wire): the panel needs them to tell an upload from an image.
+  assert.deepEqual(row.facts.families.sort(), ['file-objects', 'files'])
   assert.equal(row.freedByDeletingBytes, 34800)
 })
 

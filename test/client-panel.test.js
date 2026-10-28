@@ -466,3 +466,147 @@ test('a cached open is followed by a real read, and a cached dial change is not'
   assert.equal(loaded.shouldRescanAfter(null, 'open'), false)
   assert.equal(loaded.shouldRescanAfter(undefined, 'open'), false)
 })
+
+/**
+ * An uploaded file as the server grades it.
+ *
+ * Only `files`/`file-objects` rows are uploads; `objects` rows are images and are excluded
+ * from the preview (the row's own image count already covers them). `sessionIds` is the
+ * reference list the grader produced — a length above one means shared.
+ */
+function uploadRow({
+  id = 'f'.repeat(64),
+  name = 'contract.docx',
+  bytes = 1024,
+  families = ['files', 'file-objects'],
+  sessionIds = ['s-archived-demo'],
+  tier = 'safe',
+} = {}) {
+  return {
+    kind: 'attachment',
+    id,
+    tier,
+    tierReasons: [],
+    blockingChecks: [],
+    selectable: true,
+    batchClearable: true,
+    dedupCount: sessionIds.length,
+    freedByDeletingBytes: bytes,
+    freedBreakdown: {},
+    bytes,
+    facts: {
+      paths: [
+        `/home/.dsh/attachments/v1/files/60/${id}/${name}`,
+        `/home/.dsh/attachments/v1/file-objects/60/${id}`,
+      ],
+      families,
+      name,
+      sessionIds,
+    },
+  }
+}
+
+function uploadsToggleOf(tree, id) {
+  return walk(tree).find((node) => node.props?.['data-dshr-uploads-toggle'] === id) ?? null
+}
+
+function uploadsListOf(tree, id) {
+  return walk(tree).find((node) => node.props?.['data-dshr-uploads'] === id) ?? null
+}
+
+test('a session row carries a disclosure that counts its exclusive upload files', () => {
+  const row = sessionRow(false)
+  const tree = render(reportWith({ sessions: { safe: [row] }, attachments: { safe: [uploadRow()] } }))
+  const toggle = uploadsToggleOf(tree, 's-archived-demo')
+  assert.notEqual(toggle, null, 'the session row offered no way to preview its uploads')
+  assert.equal(toggle.props['aria-expanded'], false)
+  assert.match(textOf(toggle), /上传文件 1/)
+  // Collapsed by default: the preview must not push the tier apart before it is asked for.
+  assert.equal(uploadsListOf(tree, 's-archived-demo'), null)
+})
+
+test('expanding a row itemises name, size and the path under the attachments root', () => {
+  const row = sessionRow(false)
+  const attachment = uploadRow({ name: '季度报告.docx', bytes: 34800 })
+  const tree = render(
+    reportWith({ sessions: { safe: [row] }, attachments: { safe: [attachment] } }),
+    { uploadOpen: new Set(['s-archived-demo']) },
+  )
+  const toggle = uploadsToggleOf(tree, 's-archived-demo')
+  assert.equal(toggle.props['aria-expanded'], true)
+  const list = uploadsListOf(tree, 's-archived-demo')
+  assert.notEqual(list, null, 'expanding the toggle rendered no list')
+  const text = textOf(list)
+  assert.match(text, /季度报告\.docx/)
+  assert.match(text, /34\.0 KB/)
+  assert.match(text, /files\/60\//, 'the path shown is not the one under attachments/v1')
+  assert.doesNotMatch(text, /\/home\//, 'the absolute path (and the home directory) leaked into the list')
+  // The absolute path survives as the tooltip, which is what Finder and copy-paste need.
+  const item = walk(list).find((node) => node.props?.['data-dshr-upload'] === attachment.id)
+  assert.match(item.props.title, /^\/home\/\.dsh\/attachments\/v1\/files\//)
+})
+
+test('the preview shows the five largest first, then folds the rest with a count', () => {
+  const row = sessionRow(false)
+  const attachments = []
+  for (let index = 1; index <= 7; index += 1) {
+    attachments.push(uploadRow({ id: String(index).padStart(64, '0'), name: `f${index}.bin`, bytes: index * 100 }))
+  }
+  const report = reportWith({ sessions: { safe: [row] }, attachments: { safe: attachments } })
+  const folded = textOf(uploadsListOf(render(report, { uploadOpen: new Set(['s-archived-demo']) }), 's-archived-demo'))
+  assert.match(folded, /共 2\.7 KB/)
+  assert.match(folded, /还有 2 个/)
+  // Largest first: f7…f3 are on screen, f2 and f1 are folded away.
+  for (const name of ['f7.bin', 'f6.bin', 'f5.bin', 'f4.bin', 'f3.bin']) assert.match(folded, new RegExp(name.replace('.', '\\.')))
+  assert.doesNotMatch(folded, /f2\.bin/)
+  assert.doesNotMatch(folded, /f1\.bin/)
+
+  const expanded = textOf(
+    uploadsListOf(render(report, { uploadOpen: new Set(['s-archived-demo']), uploadAll: new Set(['s-archived-demo']) }), 's-archived-demo'),
+  )
+  assert.doesNotMatch(expanded, /还有/)
+  assert.match(expanded, /f1\.bin/)
+  assert.match(expanded, /收起/)
+})
+
+test('a session with no exclusive uploads says so instead of showing zero silently', () => {
+  const row = sessionRow(false)
+  const tree = render(reportWith({ sessions: { safe: [row] } }), { uploadOpen: new Set(['s-archived-demo']) })
+  assert.match(textOf(uploadsListOf(tree, 's-archived-demo')), /本会话没有独占的上传文件/)
+  assert.match(textOf(uploadsToggleOf(tree, 's-archived-demo')), /上传文件 0/)
+})
+
+test('a shared upload is counted but not listed, because deleting either session frees none of it', () => {
+  const row = sessionRow(false)
+  const tree = render(
+    reportWith({ sessions: { safe: [row] }, attachments: { safe: [uploadRow({ name: 'shared.pdf', sessionIds: ['s-archived-demo', 's-other'] })] } }),
+    { uploadOpen: new Set(['s-archived-demo']) },
+  )
+  const text = textOf(uploadsListOf(tree, 's-archived-demo'))
+  assert.match(text, /本会话没有独占的上传文件/)
+  assert.match(text, /共享未释放 1 张/)
+  assert.doesNotMatch(text, /shared\.pdf/)
+})
+
+test('images are not uploads: an objects row never enters the list', () => {
+  const row = sessionRow(false)
+  const image = uploadRow({ name: 'shot.png', families: ['objects'] })
+  const tree = render(reportWith({ sessions: { safe: [row] }, attachments: { safe: [image] } }))
+  assert.match(textOf(uploadsToggleOf(tree, 's-archived-demo')), /上传文件 0/)
+})
+
+test('a live session still previews, and says the files cannot be deleted yet', () => {
+  const row = sessionRow(false)
+  row.facts.livenessState = 'running'
+  const tree = render(
+    reportWith({ sessions: { danger: [row] }, attachments: { danger: [uploadRow({ tier: 'danger' })] } }),
+    { uploadOpen: new Set(['s-archived-demo']) },
+  )
+  assert.notEqual(uploadsToggleOf(tree, 's-archived-demo'), null, 'a live session row lost its preview')
+  assert.match(textOf(uploadsListOf(tree, 's-archived-demo')), /正在使用，不可删/)
+})
+
+test('a pending row offers no preview: its attachments have not been graded at all', () => {
+  const tree = render(pendingReport())
+  assert.equal(uploadsToggleOf(tree, 's-archived-demo'), null)
+})
