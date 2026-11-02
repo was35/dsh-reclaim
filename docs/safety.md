@@ -400,6 +400,7 @@ BATCH_SUBDIRS = { session: 'sessions', 'session-cache': 'session-caches',
 ### 5.4 「确认」在界面上的实际形态
 
 - 批量清：勾选 `safe` 行 → 按钮文案「隔离所选 N 项（可恢复）」+ 注「只会搬进插件自带的隔离区，不会销毁任何东西」（`lib/messages.js:43-145` 对应键，`lib/client.js:625`）；
+- 固定条：安全档默认展开，需确认与危险档默认折叠，折叠只收行、不收信息——标题行始终显示 badge、一句短原因与「N 项」，展开控件是 `h4 > button[aria-expanded]`，行体是它的兄弟；「全选安全项（N）」只勾当前审计视图里可批量隔离的 safe 行（需确认/危险本就没有复选框，另一张卡上的可清理对象走 `POST /clear`、不参与勾选），「清除选择」只清选择、不收起任何已展开的档或披露——折叠记的是读者的位置，选择记的是下一次动作（`lib/client.js` 的 `selectableSafeIds` 与 `renderTier`，`lib/messages.js` 的 `action.selectSafe` / `action.clearSelection` / `tier.*Note`）。
 - 需确认档：无复选框，「仍要隔离…」展开后列出阻塞条件与家族规模，按钮「确认隔离这一族」；家族整族一起动（`lib/client.js:755-790`、`lib/client.js:1081-1095`）；
 - 危险档：复选框禁用（`lib/client.js:674-690`）；
 - **参考图未读完时（冷启动首屏）**：表格照常显示标题与「已归档 / 归档状态未知」徽章，但分档标题写作「判定中…」、每行是**禁用**的 `pending` 复选框、行内只报「大小 / 未活动天数 / 判定中」（图片张数、删掉可释放、共享张数都来自引用图，此时**不显示**而不是显示 0）、顶部三个数字显示 `—`、主按钮位置换成一句「参考图读完前不提供任何隔离操作」（`lib/client.js` 的 `renderPending` 与 `renderRow` 的 `pending` 分支）。参考图读完后的完整分档自动替换这一屏。

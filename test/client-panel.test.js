@@ -72,6 +72,7 @@ const loaded = (() => {
     shouldRescanAfter: panel.shouldRescanAfter,
     rememberReceipt: panel.rememberReceipt,
     summarizeReceipts: panel.summarizeReceipts,
+    selectableSafeIds: panel.selectableSafeIds,
   }
 })()
 
@@ -605,7 +606,8 @@ test('a live session still previews, and says the files cannot be deleted yet', 
   row.facts.livenessState = 'running'
   const tree = render(
     reportWith({ sessions: { danger: [row] }, attachments: { danger: [uploadRow({ tier: 'danger' })] } }),
-    { uploadOpen: new Set(['s-archived-demo']) },
+    // The danger tier starts folded; this test is about the row behind the fold, so it opens it.
+    { uploadOpen: new Set(['s-archived-demo']), openTiers: new Set(['safe', 'danger']) },
   )
   assert.notEqual(uploadsToggleOf(tree, 's-archived-demo'), null, 'a live session row lost its preview')
   assert.match(textOf(uploadsListOf(tree, 's-archived-demo')), /正在使用，不可删/)
@@ -880,3 +882,154 @@ test('the permanent-delete record belongs to the quarantine view, not the audit 
   const announcer = walk(tree).find((node) => node.props?.['data-dshr-announcer'] !== undefined)
   assert.equal(textOf(announcer), '', 'an audit view announced a purge that is not on screen')
 })
+
+// --- #25: the selection helpers, and the tiers that start folded ---------------
+
+/** A session row with a distinct id and tier, built from the same fixture the other tests use. */
+function tierRow(id, tier, overrides = {}) {
+  return { ...sessionRow(false), id, tier, ...overrides }
+}
+
+/** The fold control of one session tier, found by the attribute it carries. */
+function tierToggle(tree, tier) {
+  return walk(tree).find((node) => node.props?.['data-dshr-tier-toggle'] === tier) ?? null
+}
+
+/** The two selection helpers in the action bar, found by their attributes. */
+function buttonBy(tree, attribute) {
+  return walk(tree).find((node) => node.type === 'button' && node.props?.[attribute] !== undefined) ?? null
+}
+
+test('the safe tier starts open; confirm and danger start folded with their count still visible', () => {
+  const tree = render(
+    reportWith({
+      sessions: {
+        safe: [tierRow('s-safe', 'safe')],
+        confirm: [tierRow('s-confirm', 'confirm')],
+        danger: [tierRow('s-danger', 'danger')],
+      },
+    }),
+  )
+
+  assert.notEqual(rowById(tree, 's-safe'), null, 'the safe tier did not start open')
+  assert.equal(rowById(tree, 's-confirm'), null, 'the confirm tier started open')
+  assert.equal(rowById(tree, 's-danger'), null, 'the danger tier started open')
+
+  for (const tier of ['safe', 'confirm', 'danger']) {
+    const toggle = tierToggle(tree, tier)
+    assert.notEqual(toggle, null, `the ${tier} tier lost its fold control`)
+    assert.equal(toggle.type, 'button', `the ${tier} fold control is not a button`)
+    assert.equal(toggle.props['aria-expanded'], tier === 'safe', `the ${tier} tier claims the wrong open state`)
+    assert.match(textOf(toggle), /1 项/, `the folded ${tier} tier hid how many rows it holds`)
+  }
+
+  // A folded tier still says why it is folded: the header carries the short reason, so a
+  // person does not have to unfold the rows to find out what they are.
+  assert.match(textOf(tierToggle(tree, 'confirm')), /需逐项确认/)
+  assert.match(textOf(tierToggle(tree, 'danger')), /界面不提供隔离入口/)
+  assert.match(textOf(tierToggle(tree, 'safe')), /可批量隔离/)
+})
+
+test('opening a folded tier renders its rows; folding is an input, not something derived from the rows', () => {
+  const report = reportWith({ sessions: { confirm: [tierRow('s-confirm', 'confirm')] } })
+
+  const open = render(report, { openTiers: new Set(['safe', 'confirm']) })
+  assert.notEqual(rowById(open, 's-confirm'), null, 'an opened tier rendered no rows')
+  assert.equal(tierToggle(open, 'confirm').props['aria-expanded'], true)
+
+  // The same report with the fold shut again: the fold state is the input's, so a reload that
+  // brings back the same rows must not silently reopen a tier the user closed.
+  const shut = render(report, { openTiers: new Set(['safe']) })
+  assert.equal(rowById(shut, 's-confirm'), null)
+  assert.equal(tierToggle(shut, 'confirm').props['aria-expanded'], false)
+})
+
+test('clicking a tier header asks the panel to toggle exactly that tier', () => {
+  const seen = []
+  const tree = render(reportWith({ sessions: { confirm: [tierRow('s-confirm', 'confirm')] } }), {}, {
+    toggleTier: (tier) => seen.push(tier),
+  })
+  tierToggle(tree, 'confirm').props.onClick()
+  assert.deepEqual(seen, ['confirm'])
+})
+
+test('an empty tier keeps its explanation and offers nothing to fold', () => {
+  const tree = render(reportWith({}))
+  assert.equal(tierToggle(tree, 'confirm'), null, 'an empty tier offered a fold control')
+  assert.match(textOf(tree), /没有需要逐个确认的项/)
+})
+
+test('select-all takes exactly the safe sessions that can still be moved, and never another tier', () => {
+  const report = reportWith({
+    sessions: {
+      safe: [
+        tierRow('s-a', 'safe'),
+        tierRow('s-b', 'safe'),
+        // The server graded this one safe but not batch-clearable: a checkbox it refuses.
+        tierRow('s-blocked', 'safe', { batchClearable: false }),
+      ],
+      confirm: [tierRow('s-confirm', 'confirm')],
+    },
+  })
+
+  assert.deepEqual(Array.from(loaded.selectableSafeIds(report, new Map())), ['s-a', 's-b'])
+
+  // A row the last run proved unactionable (already in the quarantine, or its directory is
+  // gone) is not offered again by a button that would only fail on it.
+  const unavailable = new Map([['s-a', 'row.inQuarantine']])
+  assert.deepEqual(Array.from(loaded.selectableSafeIds(report, unavailable)), ['s-b'])
+
+  // Clearable cache families and attachments are a different surface with a different route
+  // (POST /clear, not POST /delete); "all safe" here means the session tiers only.
+  const clearablesOnly = reportWith({ caches: { safe: [SAFE_FAMILY] }, attachments: { safe: [] } })
+  assert.deepEqual(Array.from(loaded.selectableSafeIds(clearablesOnly, new Map())), [])
+})
+
+test('the bar offers select-all with its scope in the label, and disables it when nothing is left to add', () => {
+  const report = reportWith({ sessions: { safe: [tierRow('s-a', 'safe'), tierRow('s-b', 'safe')] } })
+  let pressed = 0
+  const tree = render(report, {}, { selectSafe: () => { pressed += 1 } })
+  const button = buttonBy(tree, 'data-dshr-select-safe')
+  assert.notEqual(button, null, 'the select-all control is missing from the action bar')
+  assert.equal(button.props.disabled, false)
+  assert.equal(textOf(button), '全选安全项（2）')
+  button.props.onClick()
+  assert.equal(pressed, 1)
+
+  // Everything safe already ticked: pressing again could only be a no-op, so it is not offered.
+  const all = render(report, { selected: new Set(['s-a', 's-b']) }, {})
+  assert.equal(buttonBy(all, 'data-dshr-select-safe').props.disabled, true)
+
+  // No safe rows at all: the button says so instead of inviting a click that does nothing.
+  const none = render(reportWith({}), {}, {})
+  const empty = buttonBy(none, 'data-dshr-select-safe')
+  assert.equal(empty.props.disabled, true)
+  assert.equal(textOf(empty), '全选安全项（0）')
+})
+
+test('select-all and clear-selection are both off the table while a run is in flight', () => {
+  const report = reportWith({ sessions: { safe: [tierRow('s-a', 'safe')] } })
+  const tree = render(report, { selected: new Set(['s-a']), busy: 'clean' })
+  assert.equal(buttonBy(tree, 'data-dshr-select-safe').props.disabled, true, 'select-all stayed live during a run')
+  assert.equal(buttonBy(tree, 'data-dshr-clear-selection').props.disabled, true, 'clear-selection stayed live during a run')
+})
+
+test('clear-selection is offered only while something is selected, and drops the selection in one step', () => {
+  const report = reportWith({ sessions: { safe: [tierRow('s-a', 'safe'), tierRow('s-b', 'safe')] } })
+
+  const idle = buttonBy(render(report, {}, {}), 'data-dshr-clear-selection')
+  assert.notEqual(idle, null, 'the clear-selection control is missing from the action bar')
+  assert.equal(idle.props.disabled, true, 'clear-selection was offered with nothing selected')
+  assert.equal(textOf(idle), '清除选择')
+
+  let cleared = 0
+  const some = render(report, { selected: new Set(['s-a']) }, { clearSelection: () => { cleared += 1 } })
+  const button = buttonBy(some, 'data-dshr-clear-selection')
+  assert.equal(button.props.disabled, false)
+  button.props.onClick()
+  assert.equal(cleared, 1)
+  // Clearing the selection does not touch the folds or the disclosures: those are about
+  // reading the list, not about what the next action would move.
+  assert.equal(buttonBy(some, 'data-dshr-select-safe').props.disabled, false)
+})
+
