@@ -93,7 +93,7 @@ function textOf(node) {
 
 const noop = () => {}
 
-function render(report, overrides = {}) {
+function render(report, overrides = {}, handlers = {}) {
   return loaded.renderPanel(
     loaded.react,
     {
@@ -121,6 +121,7 @@ function render(report, overrides = {}) {
       refresh: noop,
       cleanUp: noop,
       cleanFamily: noop,
+      ...handlers,
     },
   )
 }
@@ -610,3 +611,75 @@ test('a pending row offers no preview: its attachments have not been graded at a
   const tree = render(pendingReport())
   assert.equal(uploadsToggleOf(tree, 's-archived-demo'), null)
 })
+
+test('a finished run reports its three counts where the click happened', () => {
+  const run = {
+    total: 3,
+    moved: 1,
+    failed: 1,
+    already: 1,
+    failures: [{ id: 'deadbeefdeadbeef', codes: ['permission-denied'], reason: 'permission denied by the filesystem' }],
+    quarantined: [{ id: 'q', batchId: 'b', createdAt: null }],
+  }
+  const tree = render(reportWith({ sessions: { safe: [sessionRow(false)] } }), { run })
+  const card = walk(tree).find((node) => node.props?.['data-dshr-run'] !== undefined)
+  assert.notEqual(card, undefined, 'a finished run rendered no result card')
+  assert.equal(card.props['data-dshr-run'], '1:1:1')
+  assert.equal(card.props.role, undefined, 'the card is not itself the live region')
+
+  // The announcement comes from a region that was already in the tree, not from a node
+  // inserted with its text — the latter is commonly not announced at all.
+  const announcer = walk(tree).find((node) => node.props?.['data-dshr-announcer'] !== undefined)
+  assert.notEqual(announcer, undefined)
+  assert.equal(announcer.props.role, 'status')
+  assert.equal(announcer.props['aria-live'], 'polite')
+  assert.match(textOf(announcer), /已搬走 1 项，失败 1 项，已在隔离区 1 项/)
+
+  const idle = walk(render(reportWith({ sessions: { safe: [sessionRow(false)] } }))).find(
+    (node) => node.props?.['data-dshr-announcer'] !== undefined,
+  )
+  assert.notEqual(idle, undefined, 'the live region must exist before the first run')
+  assert.equal(textOf(idle), '')
+
+  const text = textOf(card)
+  assert.match(text, /已搬走 1 项/)
+  assert.match(text, /失败 1 项/)
+  assert.match(text, /已在隔离区 1 项/)
+
+  const details = walk(card).find((node) => node.type === 'details')
+  assert.notEqual(details, undefined, 'the failure reason had no expander')
+  assert.match(textOf(details.children[0]), /失败原因 \(1\)/)
+  assert.match(text, /deadbeef/)
+  assert.match(text, /permission denied by the filesystem/)
+})
+
+test('the result card offers the quarantine view instead of navigating there', () => {
+  const views = []
+  const run = { total: 1, moved: 1, failed: 0, already: 0, failures: [], quarantined: [{ id: 'q', batchId: 'b', createdAt: null }] }
+  const tree = render(
+    reportWith({ sessions: { safe: [sessionRow(false)] } }),
+    { run },
+    { setView: (view) => views.push(view) },
+  )
+
+  const card = walk(tree).find((node) => node.props?.['data-dshr-run'] !== undefined)
+  assert.equal(card.props['data-dshr-run'], '1:0:0')
+  const button = walk(card).find((node) => node.props?.['data-dshr-run-bin'] !== undefined)
+  assert.notEqual(button, undefined, 'no way to open the quarantine from the result card')
+  assert.match(textOf(button), /查看隔离区/)
+  assert.deepEqual(views, [], 'rendering the card must not navigate by itself')
+  button.props.onClick()
+  assert.deepEqual(views, ['bin'])
+})
+
+test('a row a run proved unactionable is shown disabled with its reason', () => {
+  const tree = render(reportWith({ sessions: { safe: [sessionRow(false)] } }), {
+    unavailable: new Map([['s-archived-demo', 'row.inQuarantine']]),
+  })
+  const row = rowById(tree, 's-archived-demo')
+  assert.equal(row.selectable, 'false')
+  assert.equal(row.disabled, true)
+  assert.match(row.text, /已在隔离区/)
+  assert.notEqual(walk(tree).find((node) => node.props?.['data-dshr-unavailable-badge'] !== undefined), undefined)
+})
+

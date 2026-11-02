@@ -17,6 +17,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
+import { buildManifest, writeManifest } from '../lib/manifest.js'
 import { registerRoutes } from '../lib/routes.js'
 
 const TARGET = '33333333-3333-4333-8333-333333333333'
@@ -89,4 +90,89 @@ test('POST /delete refuses a traversal sessionId with 400 Bad Request', async ()
   assert.equal(response.status, 400)
   assert.equal(body.ok, false)
   assert.match(body.error, /path traversal/)
+})
+
+/**
+ * Put one session into the quarantine, the way a real move would: a batch directory
+ * with a manifest naming the session. Nothing else is needed — the question the route
+ * asks is "does a batch claim this session", and the manifest is the only record.
+ */
+function quarantineSession(home, sessionId) {
+  const batchId = '20260101T000000000-0001'
+  const batchDir = join(home, '.dsh-reclaim-trash', batchId)
+  const manifest = buildManifest({
+    batchId,
+    createdAt: '2026-01-01T00:00:00.000Z',
+    volumeRoot: null,
+    entries: [
+      {
+        kind: 'session',
+        sessionId,
+        originalPath: join(home, 'sessions', '--workspace--', `session-${sessionId}`),
+        relativePath: `sessions/--workspace--/session-${sessionId}`,
+        files: 1,
+        bytes: 10,
+      },
+    ],
+  })
+  const written = writeManifest(batchDir, manifest)
+  assert.equal(written.ok, true, `could not seed a quarantine batch: ${written.reason}`)
+  return batchId
+}
+
+test('POST /delete says already quarantined when a batch holds the missing session', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'dsh-reclaim-delete-quarantine-'))
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  try {
+    const batchId = quarantineSession(home, TARGET)
+    const { ctx, handlers } = recordingHost()
+    registerRoutes(ctx, {})
+
+    const handler = handlers.get('/api/dsh-reclaim/delete')
+    const response = await handler({
+      text: async () => JSON.stringify({ sessionId: TARGET, confirm: true }),
+    })
+    const body = await response.json()
+
+    assert.equal(response.status, 200, `expected an answer, not a failure response: ${JSON.stringify(body)}`)
+    assert.equal(body.ok, false)
+    assert.equal(body.sourceGone, true)
+    assert.notEqual(body.alreadyInQuarantine, null, 'the quarantine batch holding this session was not reported')
+    assert.equal(body.alreadyInQuarantine.batchId, batchId)
+    assert.equal(body.alreadyInQuarantine.canRestore, true)
+    assert.ok(
+      body.plan.blockers.some((entry) => entry.code === 'session-dir-not-found'),
+      'the answer should still explain what was refused',
+    )
+  } finally {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('POST /delete reports a vanished source, not a quarantine hit, when no batch holds it', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'dsh-reclaim-delete-gone-'))
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  try {
+    const { ctx, handlers } = recordingHost()
+    registerRoutes(ctx, {})
+
+    const handler = handlers.get('/api/dsh-reclaim/delete')
+    const response = await handler({
+      text: async () => JSON.stringify({ sessionId: TARGET, confirm: true }),
+    })
+    const body = await response.json()
+
+    assert.equal(response.status, 200)
+    assert.equal(body.ok, false)
+    assert.equal(body.sourceGone, true)
+    assert.equal(body.alreadyInQuarantine, null)
+  } finally {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+    rmSync(home, { recursive: true, force: true })
+  }
 })
