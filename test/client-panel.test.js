@@ -20,6 +20,8 @@ import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import { createContext, runInContext } from 'node:vm'
 
+import { translatePanel } from '../lib/messages.js'
+
 const SOURCE = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
 
 /** The smallest React this panel uses: `createElement`, and nothing else. */
@@ -421,7 +423,7 @@ test('a pending paint offers nothing to clean up, and no numbers it has not read
   )
   // The clearable-artifact card is graded from the graph too, so it is absent rather than empty.
   assert.equal(walk(tree).some((node) => node.props?.['data-dshr-clearables'] === 'true'), false)
-  assert.match(textOf(tree), /参考图读完前不提供任何清理操作/)
+  assert.match(textOf(tree), /参考图读完前不提供任何隔离操作/)
 
   // Zero would read as "nothing is reclaimable"; unknown is the only honest value here.
   const net = walk(tree).find((node) => node.props?.['data-dshr-net'] !== undefined)
@@ -633,7 +635,7 @@ test('a finished run reports its three counts where the click happened', () => {
   assert.notEqual(announcer, undefined)
   assert.equal(announcer.props.role, 'status')
   assert.equal(announcer.props['aria-live'], 'polite')
-  assert.match(textOf(announcer), /已搬走 1 项，失败 1 项，已在隔离区 1 项/)
+  assert.match(textOf(announcer), /已隔离 1 项，失败 1 项，已在隔离区 1 项/)
 
   const idle = walk(render(reportWith({ sessions: { safe: [sessionRow(false)] } }))).find(
     (node) => node.props?.['data-dshr-announcer'] !== undefined,
@@ -642,7 +644,7 @@ test('a finished run reports its three counts where the click happened', () => {
   assert.equal(textOf(idle), '')
 
   const text = textOf(card)
-  assert.match(text, /已搬走 1 项/)
+  assert.match(text, /已隔离 1 项/)
   assert.match(text, /失败 1 项/)
   assert.match(text, /已在隔离区 1 项/)
 
@@ -683,3 +685,48 @@ test('a row a run proved unactionable is shown disabled with its reason', () => 
   assert.notEqual(walk(tree).find((node) => node.props?.['data-dshr-unavailable-badge'] !== undefined), undefined)
 })
 
+
+test('the copy in this bundle and the shared dictionary agree on the renamed actions', () => {
+  // `lib/client.js` carries a hand-written copy of the copy (`INLINE_MESSAGES`), because the
+  // host's locale service may answer with the key itself and `t()` then falls back to it. Two
+  // copies that must agree is a bug factory: #23 renamed the same 38 entries in both, and this
+  // is the assertion that notices when only one of them is edited next time.
+  const inline = loaded.plugin.__messages.PANEL_MESSAGES
+  const params = { count: 3, moved: 1, failed: 0, already: 1, size: '1.0 MB', reason: 'boom' }
+
+  assert.deepEqual(
+    Object.keys(inline.zh).sort(),
+    Object.keys(inline.en).sort(),
+    'the inline dictionaries disagree with each other',
+  )
+
+  const renamed = [
+    'action.cleanSelected',
+    'action.cleaning',
+    'action.pendingNote',
+    'bin.destroyTitle',
+    'bin.destroy',
+    'bin.destroying',
+    'run.moved',
+    'run.failed',
+    'run.already',
+    'run.announce',
+  ]
+  for (const key of renamed) {
+    for (const locale of ['zh', 'en']) {
+      const fromBundle = loaded.plugin.__messages.translatePanel(locale, key, params)
+      const fromShared = translatePanel(locale, key, params)
+      assert.notEqual(fromShared, key, `${locale}:${key} is missing from lib/messages.js`)
+      assert.equal(fromBundle, fromShared, `${locale}:${key} drifted between lib/client.js and lib/messages.js`)
+    }
+  }
+
+  // And the retired words are not hiding in this copy either.
+  const retired = ['彻底清空', '清理所选', '搬运中', '已搬走', '仍要清理']
+  for (const key of Object.keys(inline.zh)) {
+    const text = loaded.plugin.__messages.translatePanel('zh', key, params)
+    for (const word of retired) {
+      assert.ok(!text.includes(word), `zh:${key} still says "${word}": ${text}`)
+    }
+  }
+})

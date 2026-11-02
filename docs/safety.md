@@ -22,16 +22,16 @@ TIERS = ['danger', 'confirm', 'safe', 'unclassified']
 
 | 档位 | 中文 | 界面呈现 | `selectable` | `batchClearable` |
 |---|---|---|---|---|
-| `safe` | 安全 | 复选框，可批量清 | ✅ | ✅ |
-| `confirm` | 需确认 | 无复选框；「仍要清理…」入口，展开后按族确认 | ✅ | ❌ |
+| `safe` | 安全 | 复选框，可批量隔离 | ✅ | ✅ |
+| `confirm` | 需确认 | 无复选框；「仍要隔离…」入口，展开后按族确认 | ✅ | ❌ |
 | `danger` | 危险 | 禁用复选框 + 理由 | ❌ | ❌ |
 | `unclassified` | 未分类 | 只报告 | ❌ | ❌ |
 
-`selectable` / `batchClearable` 的赋值在会话侧是 `lib/classify.js:250-253`，附件侧是 `lib/classify.js:333-334`，缓存侧是 `lib/classify.js:392-393`。界面层的三档控件渲染在 `lib/client.js:674-716`：**`safe` 给复选框，`confirm` 给「仍要清理…」按钮，`danger` 给禁用复选框**——即危险行不是「勾了再拒绝」，而是根本不提供勾选。
+`selectable` / `batchClearable` 的赋值在会话侧是 `lib/classify.js:250-253`，附件侧是 `lib/classify.js:333-334`，缓存侧是 `lib/classify.js:392-393`。界面层的三档控件渲染在 `lib/client.js:674-716`：**`safe` 给复选框，`confirm` 给「仍要隔离…」按钮，`danger` 给禁用复选框**——即危险行不是「勾了再拒绝」，而是根本不提供勾选。
 
-> **上面这一栏说的是会话档位卡片。缓存/附件有第二张卡片（`lib/client.js` 的 `renderClearables`），规则不同：`tier === 'safe' && batchClearable === true` 才给可用复选框，其余一律给禁用复选框加原因。** 差别在于「仍要清理…」是一个**替代动作**（按族确认后整族搬走），而没被枚举的缓存族没有替代动作可提供，所以诚实的形状是原因写在旁边、控件不动。见 §8.8。
+> **上面这一栏说的是会话档位卡片。缓存/附件有第二张卡片（`lib/client.js` 的 `renderClearables`），规则不同：`tier === 'safe' && batchClearable === true` 才给可用复选框，其余一律给禁用复选框加原因。** 差别在于「仍要隔离…」是一个**替代动作**（按族确认后整族搬走），而没被枚举的缓存族没有替代动作可提供，所以诚实的形状是原因写在旁边、控件不动。见 §8.8。
 
-> **关于 `file-objects` 与 `files` 附件族：** 在之前版本中因缺乏样本暂列为 `reportOnly`；现已确认二者为 content-addressed 内容文件与文件名别名硬链接对。两族已解除 `reportOnly` 限制，通过 `indexAttachmentsOnDisk` 聚合成同一附件对象并统计物理字节。在引用图谱完整且零引用（或引用会话已被彻底删除）时，被正确评级为 `safe` 并提供勾选清理，清理时双硬链接协同移入隔离区 `trash/attachments/`，并支持字节对齐完整还原。
+> **关于 `file-objects` 与 `files` 附件族：** 在之前版本中因缺乏样本暂列为 `reportOnly`；现已确认二者为 content-addressed 内容文件与文件名别名硬链接对。两族已解除 `reportOnly` 限制，通过 `indexAttachmentsOnDisk` 聚合成同一附件对象并统计物理字节。在引用图谱完整且零引用（或引用会话已被彻底删除）时，被正确评级为 `safe` 并提供勾选隔离，隔离时双硬链接协同移入隔离区 `trash/attachments/`，并支持字节对齐完整还原。
 
 ### 1.2 会话
 
@@ -399,11 +399,11 @@ BATCH_SUBDIRS = { session: 'sessions', 'session-cache': 'session-caches',
 
 ### 5.4 「确认」在界面上的实际形态
 
-- 批量清：勾选 `safe` 行 → 按钮文案「清理所选 N 项（进隔离区，可恢复）」+ 注「只会搬进插件自带的隔离区，不会销毁任何东西」（`lib/messages.js:43-145` 对应键，`lib/client.js:625`）；
-- 需确认档：无复选框，「仍要清理…」展开后列出阻塞条件与家族规模，按钮「确认清理这一族」；家族整族一起动（`lib/client.js:755-790`、`lib/client.js:1081-1095`）；
+- 批量清：勾选 `safe` 行 → 按钮文案「隔离所选 N 项（可恢复）」+ 注「只会搬进插件自带的隔离区，不会销毁任何东西」（`lib/messages.js:43-145` 对应键，`lib/client.js:625`）；
+- 需确认档：无复选框，「仍要隔离…」展开后列出阻塞条件与家族规模，按钮「确认隔离这一族」；家族整族一起动（`lib/client.js:755-790`、`lib/client.js:1081-1095`）；
 - 危险档：复选框禁用（`lib/client.js:674-690`）；
-- **参考图未读完时（冷启动首屏）**：表格照常显示标题与「已归档 / 归档状态未知」徽章，但分档标题写作「判定中…」、每行是**禁用**的 `pending` 复选框、行内只报「大小 / 未活动天数 / 判定中」（图片张数、删掉可释放、共享张数都来自引用图，此时**不显示**而不是显示 0）、顶部三个数字显示 `—`、清理按钮位置换成一句「参考图读完前不提供任何清理操作」（`lib/client.js` 的 `renderPending` 与 `renderRow` 的 `pending` 分支）。参考图读完后的完整分档自动替换这一屏。
-- 永久删除：**唯一使用浏览器原生 `window.confirm` 的地方**，先报「N 项 · X」再问，标题「彻底清空（不可恢复）」，正文「将永久删除 N 项、X。这不进回收站，无法撤销。」（`lib/client.js:1121-1126`、`lib/client.js:1421-1424`）。而且 `POST /purge` 会在缺少 `confirm` 时把 `wouldDestroy` 一并返回，界面据此显示数字（`lib/routes.js:619-637`）。
+- **参考图未读完时（冷启动首屏）**：表格照常显示标题与「已归档 / 归档状态未知」徽章，但分档标题写作「判定中…」、每行是**禁用**的 `pending` 复选框、行内只报「大小 / 未活动天数 / 判定中」（图片张数、删掉可释放、共享张数都来自引用图，此时**不显示**而不是显示 0）、顶部三个数字显示 `—`、主按钮位置换成一句「参考图读完前不提供任何隔离操作」（`lib/client.js` 的 `renderPending` 与 `renderRow` 的 `pending` 分支）。参考图读完后的完整分档自动替换这一屏。
+- 永久删除：**唯一使用浏览器原生 `window.confirm` 的地方**，先报「N 项 · X」再问，标题「彻底删除（不可恢复）」，正文「将永久删除 N 项、X。这不进回收站，无法撤销。」（`lib/client.js:1121-1126`、`lib/client.js:1421-1424`）。而且 `POST /purge` 会在缺少 `confirm` 时把 `wouldDestroy` 一并返回，界面据此显示数字（`lib/routes.js:619-637`）。
 
 ### 5.5 这些保证是怎么被验证的
 
@@ -475,7 +475,7 @@ esac
 |---|---|---|
 | 投影缓存按**默认** storage-json 布局判定 | 宿主若迁移过 `storage-json.root`，孤儿缓存检测**不覆盖**（storage 服务不暴露根路径） | `lib/caches.js:39-42` |
 | `file-objects` / `files` 两族已接入引用图谱 | 零引用孤儿可安全清理，双硬链接协同移入隔离区与恢复 | `lib/classification-report.js`、`lib/clear-objects.js` |
-| 归属未定义的族外对象 | 恒 `danger`，不提供清理 | `lib/classify.js:403-421` |
+| 归属未定义的族外对象 | 恒 `danger`，不提供隔离 | `lib/classify.js:403-421` |
 | 附件族只校验有官方文档的形状 | `request-images` 刻意不校验（键是请求变体身份而非内容摘要） | `lib/attachments.js:56-61` |
 | 目录深度上限 12 | 更深的子树记为 `uncertain`，且**排除**在族总数之外 | `lib/attachments.js:46`、`lib/attachments.js:93-159` |
 | 符号链接 / junction | 扫描与复制都**永不跟随**；扫描记 `nonRegular`，复制则拒绝删除原件 | `lib/attachments.js:93-159`、`lib/trash.js:371-427` |
@@ -576,11 +576,11 @@ README 说分四级。代码里除 `TIERS` 四个值之外还有：
 
 ### 8.4 README 从未提到存在「永久删除」
 
-README 的「它做什么」只说「清理**不是删除**，搬进隔离区可恢复」。但代码里有完整的永久删除通路：`lib/purge.js`、`POST /api/dsh-reclaim/purge`（`lib/routes.js:619-637`）以及界面上的「彻底清空这一批」／原生确认框「彻底清空（不可恢复）」（`lib/client.js:1121-1126`、`lib/client.js:1421-1426`）。README 说的「所有破坏性操作都要人在界面上明确确认」涵盖了它，但**「存在一个不可恢复的操作」这件事本身没有出现在 README 里**。这是本文档存在的主要理由之一。
+README 的「它做什么」只说「清理**不是删除**，搬进隔离区可恢复」。但代码里有完整的永久删除通路：`lib/purge.js`、`POST /api/dsh-reclaim/purge`（`lib/routes.js:619-637`）以及界面上的「彻底删除这一批」／原生确认框「彻底删除（不可恢复）」（`lib/client.js:1121-1126`、`lib/client.js:1421-1426`）。README 说的「所有破坏性操作都要人在界面上明确确认」涵盖了它，但**「存在一个不可恢复的操作」这件事本身没有出现在 README 里**。这是本文档存在的主要理由之一。
 
-### 8.5 「危险（不可清理）」只在界面层成立 —— **已修复**
+### 8.5 「危险（不可隔离）」只在界面层成立 —— **已修复**
 
-**原状。** 档位计算给出 `selectable: false`（`lib/classify.js:250-253`），界面把复选框禁用（`lib/client.js:674-690`），但 `POST /delete` 不复核档位、引用、归档或阈值：`planSessionDelete` 的 blocker 只有活态与「目录找不到」。所以「危险」当时是一个「界面不提供清理入口」的档，**不是**一个「API 拒绝执行」的档。
+**原状。** 档位计算给出 `selectable: false`（`lib/classify.js:250-253`），界面把复选框禁用（`lib/client.js:674-690`），但 `POST /delete` 不复核档位、引用、归档或阈值：`planSessionDelete` 的 blocker 只有活态与「目录找不到」。所以「危险」当时是一个「界面不提供隔离入口」的档，**不是**一个「API 拒绝执行」的档。
 
 **实质的洞只有一支。** `tier === 'danger'` 的判据是 `livenessBlocks || referencing.length > 0`。活态已经被 blocker 覆盖了，所以真正没人复核的是**引用**：一个被别的会话引用的会话，可以凭一个手写的 `{"sessionId": …, "confirm": true}` 被搬走。
 
@@ -645,7 +645,7 @@ README 的「它做什么」只说「清理**不是删除**，搬进隔离区可
 - 它拿到的条目只有两种 `kind`：`'session'`（`lib/delete-session.js:350`）与 `'session-cache'`（`lib/delete-session.js:364`）；
 - `lib/trash.js:65-71` 定义了 `attachment` / `cache` / `other` 三个子目录与对应 kind，`lib/manifest.js:306-315` 也为它们定义了映射，但**全库没有任何地方产生这三种 kind 的条目**（`grep` 结果只有 `classify.js` 里作为「行种类」的 `kind: 'attachment'` / `kind: 'cache'`，那是报告行的种类，不是待搬条目）；
 - 唯一接受「要删什么」的路由是 `POST /delete`，参数只有 `sessionId`（`lib/routes.js:639-701`），没有接受附件 id 或缓存路径的路由；
-- 界面只渲染 `report.tiers.sessions`（`lib/client.js:431`），检查框、批量清与「仍要清理…」三条通路最终都落到 `POST /delete` + `sessionId`。
+- 界面只渲染 `report.tiers.sessions`（`lib/client.js:431`），检查框、批量清与「仍要隔离…」三条通路最终都落到 `POST /delete` + `sessionId`。
 
 **原状里有一句我说错了，这里更正。** 上面第二条原写「附件行、缓存族行、孤儿投影缓存行都会被标 `selectable` / `batchClearable`」。缓存那一半对：`cache-family` 行在 `family.enumerated === true` 时确实被判 `tier: 'safe'`、`selectable: true`、`batchClearable: true`。**附件那一半不对，而且不是「缺生产者」，是「被分级规则挡住」**：`classifyAttachment`（`lib/classify.js:296`）在 `entry.sessionIds.length > 0` 时加 blocker `referenced-by-session`，`tier` 因此是 `danger`；而它唯一的调用方喂的是 `graph.attachments`（`lib/classification-report.js:176`、`:246`），该图的每一个条目都在 `lib/graph.js:204-211` 由「某个会话提到了这个 id」创建并 `indexed.sessionIds.push(id)`，所以 `sessionIds.length >= 1` **恒成立**——**附件行恒为 `danger`，从来没有被标成可批量清理过**。连带地，`lib/classification-report.js:436-439` 的 `alreadyOrphanRows` / `alreadyOrphanBytes` 结构性恒为 0（`totals.alreadyOrphanAttachmentBytes` 永远是 0），`lib/recompute.js:170-172` 的 `if (referenced.size === 0)` 永不进入。会变成孤儿的对象走 `lib/recompute.js:179-190`：`tier: 'confirm'`、`batchClearable: false`、`cascade: true`，注释明写「It is NOT promoted into an already-safe row: it becomes a cascade item, shown to the user rather than swept silently」——**这是刻意的安全决定，不是遗漏**。
 
