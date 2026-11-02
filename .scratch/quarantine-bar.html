@@ -1,0 +1,849 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>原型 · 隔离底栏与就地结果（#21）</title>
+<!--
+  原型：dsh-reclaim 审计面板的底部固定操作条 + 就地进度/结果条（wayfinder 票 #21）。
+  ���合并生产代码。三个变体通过 ?variant=A|B|C 切换；演示状态通过 ?state=idle0|idle|running|done&at=N
+  复现；?narrow=1 是 480px 窄窗；?long=1 打开超长标题。截图参数见 .scratch/quarantine-bar/NOTES.md。
+-->
+<style>
+  :root{
+    --bg:#0e1013; --stage:#131519; --card:#1c1f24; --card2:#191c21; --line:rgba(255,255,255,.09);
+    --line-soft:rgba(255,255,255,.06); --text:#e7e9ec; --muted:#969da6; --faint:#6f7680;
+    --accent:#5b8def; --warn:#c98a2e; --ok:#2e9e5b; --err:#d14343;
+    --focus:#7aa7ff;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:var(--text);
+    font:13px/1.5 -apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif}
+  body{padding:18px 20px 96px}
+  .sr-only{position:absolute!important;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;
+    clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
+
+  /* ---------- 原型说明 ---------- */
+  .proto{margin:0 0 14px;max-width:620px;padding:10px 12px;border:.5px dashed rgba(255,255,255,.18);
+    border-radius:8px;color:var(--muted);font-size:11.5px;line-height:1.6}
+  .proto b{color:var(--text);font-weight:600}
+  .proto code{font-family:var(--mono);font-size:11px;color:#cbb98a}
+
+  /* ---------- 宿主对话框（模拟 DSH 设置面板） ---------- */
+  .stage{width:900px;max-width:100%;margin:0 auto;transition:width .15s ease}
+  .overlay{background:rgba(0,0,0,.55);border-radius:14px;padding:26px 30px;display:flex;justify-content:center}
+  .dialog{width:800px;max-width:100%;height:820px;display:flex;overflow:hidden;
+    background:var(--stage);border:.5px solid rgba(255,255,255,.12);border-radius:12px;
+    box-shadow:0 24px 60px rgba(0,0,0,.45)}
+  .nav{width:188px;flex:none;background:var(--card2);border-right:.5px solid var(--line);padding:14px 10px;
+    display:flex;flex-direction:column;gap:2px}
+  .nav .nav-title{font-size:11px;color:var(--faint);padding:0 8px 6px}
+  .nav a{display:block;padding:5px 8px;border-radius:6px;color:var(--muted);text-decoration:none;font-size:12.5px}
+  .nav a.on{background:rgba(91,141,239,.14);color:#cfe0ff}
+  .content{flex:1;min-width:0;display:flex;flex-direction:column}
+  .dlg-head{flex:none;height:54px;display:flex;align-items:center;gap:8px;padding:20px 14px 8px 20px;
+    border-bottom:.5px solid var(--line-soft);font-weight:600}
+  .dlg-head .sub{font-weight:400;color:var(--faint);font-size:11.5px}
+  .options{flex:1;min-height:0;overflow-y:auto;padding:16px 24px 0}
+
+  /* ---------- .dshr-root 内容 ---------- */
+  .root{display:flex;flex-direction:column;gap:14px;max-width:920px;font-size:13px;line-height:20px}
+  .card{border:.5px solid rgba(255,255,255,.16);border-radius:10px;padding:12px 14px;
+    display:flex;flex-direction:column;gap:10px;background:transparent}
+  .top{display:flex;flex-wrap:wrap;gap:18px;align-items:baseline}
+  .top b{font-size:15px}
+  .muted{color:var(--muted);font-size:12px}
+  .net-pos{color:var(--ok)}
+  .thr{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+  button{font:inherit;color:inherit}
+  .thr button,.btn{border:.5px solid rgba(255,255,255,.22);background:transparent;border-radius:6px;
+    padding:4px 10px;cursor:pointer}
+  .thr button[aria-pressed="true"]{border-color:var(--accent);color:#a8c4ff}
+  .actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  .icon-btn{border:0;background:transparent;padding:2px 4px;cursor:pointer;color:var(--muted)}
+  :focus-visible{outline:2px solid var(--focus);outline-offset:2px;border-radius:4px}
+
+  .tier{display:flex;flex-direction:column;gap:6px}
+  .tier-head{display:flex;gap:8px;align-items:baseline}
+  .badge{border-radius:6px;padding:0 6px;font-size:11px;border:.5px solid currentColor}
+  .badge-safe{color:var(--ok)} .badge-confirm{color:var(--warn)} .badge-danger{color:var(--err)}
+  .badge-archived{color:#4b7bec;border-width:1px;font-weight:600;padding:0 7px}
+  .badge-moved{color:var(--ok);border-style:dashed}
+  .badge-fail{color:var(--err);border-style:dashed}
+  .badge-already{color:var(--warn);border-style:dashed}
+
+  /* 默认折叠的档：标题行即入口 */
+  .fold{border:.5px solid rgba(255,255,255,.12);border-radius:8px;background:rgba(255,255,255,.015)}
+  .fold-head{width:100%;display:flex;align-items:baseline;gap:8px;padding:8px 10px;background:0 0;
+    border:0;text-align:left;cursor:pointer;font:inherit}
+  .fold-head .why{color:var(--faint);font-size:11.5px}
+  .fold-head .count{margin-left:auto;color:var(--muted);font-size:12px;white-space:nowrap}
+  .fold-body{padding:2px 10px 10px;display:flex;flex-direction:column;gap:2px}
+
+  .rows{display:flex;flex-direction:column}
+  .row{display:flex;flex-direction:column;gap:3px;padding:6px 0;border-top:.5px solid var(--line-soft)}
+  .rows .row:first-child{border-top:0}
+  .row-head{display:flex;gap:8px;align-items:baseline;min-width:0}
+  .row-head .badge{flex:none;white-space:nowrap}
+  .row-title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:420px;min-width:0;flex:1 1 auto}
+  .row-time{margin-left:auto;color:var(--faint);font-size:12px;white-space:nowrap}
+  .row-id{font-family:var(--mono);font-size:11px;color:var(--faint);padding-left:21px}
+  .metrics{display:flex;flex-wrap:wrap;gap:10px;padding-left:21px}
+  .check{width:13px;height:13px;flex:none;margin-top:2px;accent-color:var(--accent)}
+  .row.state-moving{background:rgba(91,141,239,.07);border-radius:6px;padding-left:6px;margin-left:-6px}
+  .row.state-moved{opacity:.72}
+  .row.state-failed{background:rgba(209,67,67,.07);border-radius:6px;padding-left:6px;margin-left:-6px}
+  .row.state-already{opacity:.72}
+  .state-line{display:flex;gap:6px;align-items:baseline;padding-left:21px;font-size:11.5px}
+  .state-line.moving{color:#a8c4ff} .state-line.failed{color:var(--err)}
+  .state-line.moved{color:var(--ok)} .state-line.already{color:var(--warn)}
+  .spin{display:inline-block;width:9px;height:9px;border:1.5px solid currentColor;border-right-color:transparent;
+    border-radius:50%;animation:spin .8s linear infinite;vertical-align:-1px}
+  @keyframes spin{to{transform:rotate(360deg)}}
+
+  /* 可清理对象卡 */
+  .clearable-row{display:flex;gap:8px;align-items:baseline;padding:5px 0;border-top:.5px solid var(--line-soft)}
+  .clearable-row:first-child{border-top:0}
+  .clearable-row .kind{color:var(--muted);font-size:12px}
+  .clearable-row .size{margin-left:auto;color:var(--faint);font-size:11.5px;white-space:nowrap}
+
+  /* ---------- 底部固定条（三个变体共用容器，内部结构不同） ---------- */
+  .footer-slot{position:sticky;bottom:0;z-index:5;margin:0 -24px;
+    padding:10px 24px calc(14px + env(safe-area-inset-bottom,0px));
+    background:var(--stage);box-shadow:0 -10px 14px -10px rgba(0,0,0,.75);}
+  /* 底栏下沿补齐：滚动内容偶尔会在 sticky 底边下露出 1-5px，用同色块盖住 */
+  .footer-slot::after{content:"";position:absolute;left:0;right:0;bottom:-24px;height:24px;background:var(--stage);pointer-events:none}
+  .bar{border-top:.5px solid rgba(255,255,255,.16);padding-top:10px;display:flex;flex-direction:column;gap:8px}
+  .bar-main{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+  .bar-count{font-size:12.5px;color:var(--text);white-space:nowrap}
+  .bar-count b{font-weight:600}
+  .bar-count .sum{color:var(--faint);font-size:11.5px}
+  .bar-actions{display:flex;gap:8px;margin-left:auto;flex-wrap:wrap;align-items:center}
+  .primary{border:1px solid var(--accent);background:rgba(91,141,239,.16);color:#dce8ff;border-radius:7px;
+    padding:6px 14px;font-weight:600;cursor:pointer;white-space:nowrap}
+  .primary[disabled]{border-color:rgba(255,255,255,.16);background:rgba(255,255,255,.04);
+    color:var(--faint);cursor:not-allowed}
+  .ghost{border:.5px solid rgba(255,255,255,.22);background:transparent;border-radius:6px;padding:4px 10px;
+    cursor:pointer;color:var(--muted);white-space:nowrap}
+  .ghost[disabled]{opacity:.45;cursor:not-allowed}
+  .bar-note{color:var(--faint);font-size:11.5px}
+
+  .progress{display:flex;align-items:center;gap:8px;min-width:0;flex:1 1 260px}
+  .progress .label{font-size:12.5px;color:#cfe0ff;white-space:nowrap}
+  .progress .title{font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+  .track{height:3px;border-radius:2px;background:rgba(255,255,255,.12);overflow:hidden;flex:1 1 120px;min-width:60px}
+  .track span{display:block;height:100%;background:var(--accent);transition:width .25s ease}
+
+  /* 结果条（变体 A：叠在操作条上方；变体 B：顶部卡 + 底栏 chip；变体 C：底栏抽屉） */
+  .result{border:.5px solid rgba(255,255,255,.16);border-radius:8px;padding:8px 10px;
+    display:flex;flex-direction:column;gap:6px;background:#1b1e23}
+  .result-line{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  .result-line .ok{color:var(--ok);font-weight:600}
+  .result-line .fail{color:var(--err);font-weight:600}
+  .result-line .already{color:var(--warn);font-weight:600}
+  .result-line .sep{color:var(--faint)}
+  .result-line .grow{flex:1 1 auto}
+  .fails{border-top:.5px solid var(--line-soft);padding-top:6px;display:flex;flex-direction:column;gap:4px}
+  .fails .item{font-size:11.5px;color:var(--muted)}
+  .fails .item b{color:var(--err);font-weight:500}
+  .disclose{background:0 0;border:0;padding:0;color:var(--muted);font-size:11.5px;cursor:pointer;
+    display:inline-flex;gap:4px;align-items:center}
+  .chip{border:.5px solid rgba(255,255,255,.16);border-radius:999px;padding:2px 9px;font-size:11.5px;
+    color:var(--muted);display:inline-flex;gap:6px;align-items:center;white-space:nowrap}
+  .chip b{color:var(--text);font-weight:600}
+
+  /* 顶部就地结果卡（变体 B） */
+  .notice-card{border:.5px solid rgba(46,158,91,.45);background:rgba(46,158,91,.06);border-radius:10px;
+    padding:10px 14px;display:flex;flex-direction:column;gap:6px}
+
+  /* ---------- 原型浮层（不属于面板） ---------- */
+  .switcher{position:fixed;left:50%;bottom:16px;transform:translateX(-50%);z-index:50;
+    display:flex;flex-wrap:nowrap;white-space:nowrap;gap:6px;align-items:center;background:#24272d;border:.5px solid rgba(255,255,255,.22);
+    border-radius:999px;padding:6px 10px;box-shadow:0 10px 30px rgba(0,0,0,.5)}
+  .switcher button{border:.5px solid rgba(255,255,255,.18);background:transparent;border-radius:999px;
+    padding:3px 9px;font-size:11.5px;cursor:pointer;color:var(--muted);white-space:nowrap;flex:none}
+  .switcher button.on{background:rgba(91,141,239,.2);border-color:var(--accent);color:#dce8ff}
+  .switcher .label{font-size:11.5px;color:var(--text);min-width:210px;text-align:center;white-space:nowrap}
+  .switcher .divider{width:1px;height:18px;background:rgba(255,255,255,.16);margin:0 4px}
+  .switcher .arrow{font-size:14px;padding:2px 8px}
+
+  .announcer{position:fixed;right:16px;top:16px;width:290px;z-index:40;background:#1a1d22;
+    border:.5px solid rgba(255,255,255,.18);border-radius:10px;font-size:11px;padding:8px 10px;color:var(--muted)}
+  .announcer h4{margin:0 0 4px;font-size:11px;color:var(--text);display:flex;justify-content:space-between}
+  .announcer ol{margin:0;padding-left:16px;max-height:150px;overflow:auto;display:flex;flex-direction:column;gap:2px}
+  .announcer .polite{color:#9fc0ff} .announcer .assertive{color:#ff9a9a}
+  /* 480px 演示时隐藏调试浮层，避免遮挡面板 */
+  .narrow-mode .announcer{display:none}
+
+  /* ---------- 窄窗（480px） ---------- */
+  .stage.narrow{width:480px}
+  .narrow .overlay{padding:10px}
+  .narrow .dialog{width:100%;height:620px}
+  .narrow .nav{display:none}
+  .narrow .options{padding:12px 14px 14px}
+  .narrow .dlg-head{padding-left:14px;font-size:12.5px}
+  .narrow .row-title{white-space:normal;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
+    max-width:none;flex:1 1 auto}
+  .narrow .row-time{display:none}
+  .narrow .footer-slot{margin:0 -14px;padding:8px 14px calc(12px + env(safe-area-inset-bottom,0px))}
+  .narrow .bar-main{gap:8px}
+  .narrow .bar-actions{width:100%;margin-left:0}
+  .narrow .primary{width:100%;text-align:center;padding:8px 14px}
+  .narrow .ghost{flex:1 1 auto;text-align:center}
+  .narrow .bar-count{width:100%}
+  .narrow .progress{flex:1 1 100%}
+  .narrow .progress .title{flex:1 1 100%;padding-left:0}
+  .narrow .top{gap:12px}
+  .narrow .metrics{gap:8px 10px}
+</style>
+</head>
+<body>
+
+<p class="proto">
+  <b>原型（不合并 main）</b> · wayfinder 票 #21「原型：底部固定操作条与就地结果条」。
+  这是模拟 DSH 设置面板的静态页面，数据与请求全部是假的，只回答“长什么样、窄窗和长标题下是否可用”。
+  变体切换：<code>?variant=A|B|C</code>；演示状态：<code>?state=idle0|idle|running|done&amp;at=N</code>；
+  <code>?narrow=1</code>（480px 视口）、<code>?long=1</code>（超长标题）。
+  试一下：勾选几行 → 点主按钮；处理中连点主按钮（应当无效）；完成后展开失败原因；切到 480px。
+</p>
+
+<div class="stage" id="stage">
+  <div class="overlay">
+    <div class="dialog" role="dialog" aria-modal="true" aria-label="设置">
+      <nav class="nav" aria-label="设置分区">
+        <div class="nav-title">设置</div>
+        <a href="#" onclick="return false">外观</a>
+        <a href="#" onclick="return false">模型</a>
+        <a href="#" onclick="return false">会话</a>
+        <a href="#" class="on">磁盘清理</a>
+        <a href="#" onclick="return false">隐私</a>
+        <a href="#" onclick="return false">关于</a>
+      </nav>
+      <div class="content">
+        <div class="dlg-head">磁盘清理 <span class="sub">dsh-reclaim</span></div>
+        <div class="options" id="options">
+          <div class="root" id="root"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="live" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
+<div id="alert" class="sr-only" role="alert"></div>
+
+<aside class="announcer" aria-label="原型调试：aria-live 播报记录">
+  <h4><span>aria-live 播报记录</span><span style="color:var(--faint)" id="live-count">0</span></h4>
+  <ol id="live-log" reversed></ol>
+</aside>
+
+<div class="switcher" role="group" aria-label="原型切换">
+  <button class="arrow" id="prev" title="上一个变体（←）" aria-label="上一个变体">◀</button>
+  <span class="label" id="variant-label">A · 底栏内叠放结果</span>
+  <button class="arrow" id="next" title="下一个变体（→）" aria-label="下一个变体">▶</button>
+  <span class="divider"></span>
+  <button data-state="idle0">0 选中</button>
+  <button data-state="idle">已选 6</button>
+  <button data-state="running">处理中</button>
+  <button data-state="done">完成</button>
+  <span class="divider"></span>
+  <button id="narrow-btn">480px</button>
+  <button id="long-btn">超长标题</button>
+</div>
+
+<script>
+/* ============================================================
+   数据（全部是演示数据；与 #18 的 9 项现场同构）
+   ============================================================ */
+var SESSIONS = [
+  { id:'session-4b5898c7', title:'Refactor the export pipeline', archived:true, age:'22.4 天未活动', size:1.1e6, tier:'safe', sim:'ok' },
+  { id:'session-e02f1a90', title:'Weekly triage', archived:true, age:'31.7 天未活动', size:84e3, tier:'safe', sim:'already',
+    why:'源目录不存在；隔离区已有该会话的批次（2026-10-21）' },
+  { id:'session-77c0de12', title:'Old sync log', archived:true, age:'180.2 天未活动', size:0.4e6, tier:'safe', sim:'ok' },
+  { id:'session-9a12ff04', title:'季度预算核对 / Q3 — 跨部门对账会议纪要（第二版，含财务附件与差异说明，待与法务确认后归档）', archived:true, age:'96.0 天未活动', size:12.6e6, tier:'safe', sim:'fail',
+    why:'目录被占用：另一个进程正在写（EBUSY）' },
+  { id:'session-31c8a7de', title:'Nightly build scrape', archived:true, age:'45.9 天未活动', size:3.2e6, tier:'safe', sim:'ok' },
+  { id:'session-0d7be441', title:'原型讨论 · 底栏与结果条', archived:true, age:'12.1 天未活动', size:0.6e6, tier:'safe', sim:'ok' }
+];
+var CONFIRM = [
+  { id:'session-b2c9e110', title:'Invoice OCR run', age:'18.3 天未活动', size:6.1e6,
+    why:'与会话 family-9 共享 2 个附件，批量路由会跳过它' },
+  { id:'session-c41a7f02', title:'Design review thread', age:'27.5 天未活动', size:2.4e6,
+    why:'workspace 索引仍引用该会话（job 记录未结算）' },
+  { id:'session-d90e3a77', title:'Legacy migration script', age:'54.0 天未活动', size:0.9e6,
+    why:'未读到参考图（扫描时被跳过）' }
+];
+var DANGER = [
+  { id:'session-ff01aa23', title:'Local sandbox scratch', age:'3.2 天未活动', size:15.3e6,
+    why:'会话可能仍在运行（liveness: running）' }
+];
+var CLEARABLES = [
+  { id:'cache:rebuild-index', kind:'重建索引', tier:'safe', size:412e6, note:'可重建' },
+  { id:'cache:compiled-bundle', kind:'编译产物', tier:'confirm', size:1.4e9, note:'下次启动会重建' },
+  { id:'attachment:orphan-7f21', kind:'孤儿附件', tier:'danger', size:88e6, note:'仍被 2 个会话引用' }
+];
+var ALL_SAFE = SESSIONS.filter(function(s){ return s.tier === 'safe' }).concat(CLEARABLES.filter(function(c){ return c.tier === 'safe' }))
+
+/* ============================================================
+   状态
+   ============================================================ */
+var params = new URLSearchParams(location.search)
+var state = {
+  variant: params.get('variant') || 'A',
+  phase: 'idle',          // idle | running | done
+  selected: new Set(),
+  runningAt: 1,           // 处理到第几项（1 起）
+  results: [],            // {id,title,status:'ok'|'fail'|'already'|'pending', why}
+  resultDismissed: false,
+  failsOpen: false,
+  drawerOpen: false,      // 变体 C
+  view: 'audit',          // audit | bin
+  narrow: params.get('narrow') === '1',
+  long: params.get('long') === '1',
+  folded: { confirm: true, danger: true },
+  live: []
+}
+
+function fmt(n){
+  if (n >= 1e9) return (n/1e9).toFixed(2) + ' GB'
+  if (n >= 1e6) return (n/1e6).toFixed(1) + ' MB'
+  if (n >= 1e3) return Math.round(n/1e3) + ' KB'
+  return n + ' B'
+}
+function esc(s){ return String(s).replace(/[&<>"]/g, function(c){ return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'})[c] }) }
+function rowById(id){
+  var all = SESSIONS.concat(CONFIRM, DANGER, CLEARABLES)
+  for (var i = 0; i < all.length; i++) if (all[i].id === id) return all[i]
+  return null
+}
+function selectedItems(){
+  return Array.from(state.selected).map(rowById).filter(Boolean)
+}
+function titleOf(item){ return item.title || item.kind || item.id }
+function totalSelectedBytes(){
+  return selectedItems().reduce(function(sum, item){ return sum + (item.size || 0) }, 0)
+}
+
+/* aria-live：一次一条，文本必须变化；完成时失败用 alert */
+function announce(text, urgency){
+  var el = document.getElementById(urgency === 'assertive' ? 'alert' : 'live')
+  el.textContent = ''
+  // 同一个字符串不重播：先清空再写入下一帧
+  requestAnimationFrame(function(){ el.textContent = text })
+  state.live.push({ text: text, urgency: urgency || 'polite' })
+  renderLog()
+}
+function renderLog(){
+  var log = document.getElementById('live-log')
+  document.getElementById('live-count').textContent = String(state.live.length)
+  log.innerHTML = state.live.slice(-8).reverse().map(function(e){
+    return '<li class="' + e.urgency + '">' + esc(e.text) + '</li>'
+  }).join('')
+}
+
+/* ============================================================
+   模拟执行：700ms/项；结果由每行的 sim 决定
+   ============================================================ */
+var timer = null
+function startRun(){
+  if (state.selected.size === 0) return
+  if (state.phase === 'running') return         // 重入防线：处理中直接忽略
+  var items = selectedItems()
+  state.phase = 'running'
+  state.results = items.map(function(item){ return { id:item.id, title:titleOf(item), size:item.size, status:'pending', why:item.why } })
+  state.runningAt = 1
+  state.failsOpen = false
+  state.resultDismissed = false
+  state.drawerOpen = state.variant === 'C'
+  render()
+  tick()
+}
+function tick(){
+  clearTimeout(timer)
+  var idx = state.runningAt - 1
+  if (idx < 0) idx = 0
+  var res = state.results[idx]
+  if (!res) return finishRun()
+  var item = rowById(res.id)
+  announce('正在隔离第 ' + (idx + 1) + '/' + state.results.length + ' 项：' + res.title)
+  timer = setTimeout(function(){
+    res.status = item && item.sim === 'fail' ? 'fail' : item && item.sim === 'already' ? 'already' : 'ok'
+    state.runningAt += 1
+    if (state.runningAt > state.results.length) return finishRun()
+    render()
+    tick()
+  }, 700)
+}
+function finishRun(){
+  clearTimeout(timer)
+  state.phase = 'done'
+  var ok = state.results.filter(function(r){ return r.status === 'ok' }).length
+  var fail = state.results.filter(function(r){ return r.status === 'fail' }).length
+  var already = state.results.filter(function(r){ return r.status === 'already' }).length
+  // 完成即清空勾选：搬走的行不再可选
+  state.selected = new Set()
+  render()
+  announce('隔离完成：成功 ' + ok + ' 项，失败 ' + fail + ' 项，已在隔离区 ' + already + ' 项。', fail > 0 ? 'polite' : 'polite')
+  if (fail > 0) announce(fail + ' 项隔离失败，失败原因可在结果条展开查看。', 'assertive')
+}
+
+/* ============================================================
+   渲染
+   ============================================================ */
+function statusOf(id){
+  for (var i = 0; i < state.results.length; i++) if (state.results[i].id === id) return state.results[i]
+  return null
+}
+
+function renderRow(s, opts){
+  opts = opts || {}
+  var st = statusOf(s.id)
+  var cls = 'row'
+  var line = ''
+  if (state.phase === 'running' && st && st.status === 'pending' && state.results[state.runningAt-1] === st) {
+    cls += ' state-moving'
+    line = '<div class="state-line moving"><span class="spin"></span>搬运中 · 第 ' + state.runningAt + '/' + state.results.length + ' 项</div>'
+  } else if (st && st.status === 'ok') {
+    cls += ' state-moved'
+    line = '<div class="state-line moved">✓ 已搬走</div>'
+  } else if (st && st.status === 'fail') {
+    cls += ' state-failed'
+    line = '<div class="state-line failed">✕ 失败 · ' + esc(st.why || '未知原因') + '</div>'
+  } else if (st && st.status === 'already') {
+    cls += ' state-already'
+    line = '<div class="state-line already">• 已在隔离区 · ' + esc(st.why || '') + '</div>'
+  } else if (st && st.status === 'pending') {
+    line = '<div class="state-line" style="padding-left:21px;color:var(--faint)">排队中</div>'
+  }
+  var done = st && st.status !== 'pending'
+  var cb = opts.selectable && !done
+    ? '<input class="check" type="checkbox" data-toggle="' + esc(s.id) + '" ' + (state.selected.has(s.id) ? 'checked' : '') + ' aria-label="' + esc(s.id) + '">'
+    : '<input class="check" type="checkbox" disabled aria-label="' + esc(s.id) + '">'
+  var title = opts.long && s.longTitle ? s.longTitle : s.title
+  if (opts.long && s.id === 'session-9a12ff04') title = s.title + '（这是刻意加长的那一条：用于检查底栏进度里的截断与行内两行截断）'
+  return '<div class="' + cls + '" data-row="' + esc(s.id) + '">' +
+    '<div class="row-head">' + cb +
+      '<span class="row-title" title="' + esc(title) + '">' + esc(title) + '</span>' +
+      (s.archived ? '<span class="badge badge-archived">已归档</span>' : '') +
+      '<span class="row-time">' + esc(s.age || '') + '</span>' +
+    '</div>' +
+    '<div class="row-id">' + esc(s.id) + '</div>' +
+    '<div class="metrics muted"><span>' + fmt(s.size || 0) + '</span><span>删掉可释放 ' + fmt(s.size || 0) + '</span></div>' +
+    line +
+  '</div>'
+}
+
+function renderTierCard(){
+  var rows = SESSIONS.map(function(s){ return renderRow(s, { selectable:true, long:state.long }) }).join('')
+  return '<div class="tier"><div class="tier-head"><span class="badge badge-safe">安全</span>' +
+    '<span class="muted">' + SESSIONS.length + ' 项</span></div><div class="rows">' + rows + '</div></div>'
+}
+
+function renderFold(key, label, cls, rows, why){
+  var open = !state.folded[key]
+  var body = open ? '<div class="fold-body">' + rows + '</div>' : ''
+  return '<div class="fold"><button class="fold-head" aria-expanded="' + open + '" data-fold="' + key + '">' +
+    '<span class="badge ' + cls + '">' + label + '</span>' +
+    '<span class="why">' + why + '</span>' +
+    '<span class="count">' + (rows.split('data-row="').length - 1) + ' 项 ' + (open ? '▾' : '▸') + '</span>' +
+    '</button>' + body + '</div>'
+}
+
+function renderClearables(){
+  var rows = CLEARABLES.map(function(c){
+    var st = statusOf(c.id)
+    var done = st && st.status !== 'pending'
+    var cb = c.tier === 'safe' && !done
+      ? '<input class="check" type="checkbox" data-toggle="' + esc(c.id) + '" ' + (state.selected.has(c.id) ? 'checked' : '') + ' aria-label="' + esc(c.id) + '">'
+      : '<input class="check" type="checkbox" disabled aria-label="' + esc(c.id) + '">'
+    var badge = c.tier === 'safe' ? 'badge-safe' : c.tier === 'confirm' ? 'badge-confirm' : 'badge-danger'
+    return '<div class="clearable-row" data-row="' + esc(c.id) + '">' + cb +
+      '<span>' + esc(c.kind) + '</span><span class="badge ' + badge + '">' + c.tier + '</span>' +
+      (st && st.status === 'ok' ? '<span class="badge badge-moved">已搬走</span>' : '') +
+      '<span class="size">' + fmt(c.size) + '</span></div>'
+  }).join('')
+  return '<div class="card"><div class="tier-head"><span class="badge">可清理对象</span>' +
+    '<span class="muted">' + CLEARABLES.length + ' 项 · 与安全档共用同一个主按钮</span></div>' +
+    '<div class="muted">缓存与孤儿附件走另一条路由（服务器自行重算路径）。</div>' + rows + '</div>'
+}
+
+function resultCounts(){
+  var ok = state.results.filter(function(r){ return r.status === 'ok' }).length
+  var fail = state.results.filter(function(r){ return r.status === 'fail' }).length
+  var already = state.results.filter(function(r){ return r.status === 'already' }).length
+  return { ok:ok, fail:fail, already:already, total:state.results.length }
+}
+function failList(){
+  return state.results.filter(function(r){ return r.status === 'fail' }).map(function(r){
+    return '<div class="item"><b>' + esc(r.title) + '</b> — ' + esc(r.why || '未知原因') + '</div>'
+  }).join('')
+}
+function resultLine(compact){
+  var c = resultCounts()
+  return '<div class="result-line">' +
+    '<span>' + (c.fail > 0 ? '已处理' : '已完成') + '</span>' +
+    '<span class="ok">成功 ' + c.ok + '</span><span class="sep">·</span>' +
+    '<span class="fail">失败 ' + c.fail + '</span><span class="sep">·</span>' +
+    '<span class="already">已在隔离区 ' + c.already + '</span>' +
+    '<span class="grow"></span>' +
+    (compact ? '<button class="disclose" data-open-bin>查看隔离区</button>' : '') +
+    '</div>'
+}
+function failDisclosure(){
+  if (resultCounts().fail === 0) return ''
+  return '<button class="disclose" aria-expanded="' + state.failsOpen + '" data-fails>' +
+      (state.failsOpen ? '▾ 收起失败原因' : '▸ 失败原因（' + resultCounts().fail + '）') + '</button>' +
+    (state.failsOpen ? '<div class="fails">' + failList() + '</div>' : '')
+}
+
+/* ---------- 变体 A：结果叠在操作条上方 ---------- */
+function barA(){
+  if (state.phase === 'running') {
+    var cur = state.results[state.runningAt-1]
+    var pct = Math.round((state.runningAt-1) / state.results.length * 100)
+    return '<div class="bar">' +
+      '<div class="bar-main"><div class="progress">' +
+        '<span class="label">第 ' + state.runningAt + '/' + state.results.length + ' 项</span>' +
+        '<span class="title" title="' + esc(cur ? cur.title : '') + '">' + esc(cur ? cur.title : '') + '</span>' +
+        '<span class="track"><span style="width:' + pct + '%"></span></span>' +
+      '</div>' +
+      '<div class="bar-actions"><span class="bar-note">处理中不可重复提交</span>' +
+        '<button class="primary" disabled aria-disabled="true">正在隔离…</button></div></div>' +
+      '<div class="bar-note">只会搬进插件自带的隔离区，不会销毁任何东西</div>' +
+    '</div>'
+  }
+  if (state.phase === 'done' && !state.resultDismissed) {
+    return '<div class="bar">' +
+      '<div class="result">' + resultLine(false) + failDisclosure() + '</div>' +
+      '<div class="bar-main"><span class="bar-count">未选择任何项</span>' +
+        '<div class="bar-actions">' +
+          '<button class="ghost" data-clear disabled>清除选择</button>' +
+          '<button class="ghost" data-open-bin>查看隔离区</button>' +
+          '<button class="primary" disabled>隔离所选 0 项（可恢复）</button>' +
+        '</div></div>' +
+      '<div class="bar-note">结果留在原地；刷新或继续勾选都不会丢掉它，关闭后消失。</div>' +
+    '</div>'
+  }
+  var n = state.selected.size
+  return '<div class="bar">' +
+    '<div class="bar-main">' +
+      '<span class="bar-count">' + (n === 0 ? '未选择任何项' : '已选 <b>' + n + '</b> 项 · <span class="sum">' + fmt(totalSelectedBytes()) + '</span>') + '</span>' +
+      '<div class="bar-actions">' +
+        '<button class="ghost" data-all ' + (n === ALL_SAFE.length ? 'disabled' : '') + '>全选安全项（' + ALL_SAFE.length + '）</button>' +
+        '<button class="ghost" data-clear ' + (n === 0 ? 'disabled' : '') + '>清除选择</button>' +
+        '<button class="primary" data-run ' + (n === 0 ? 'disabled' : '') + '>隔离所选 ' + n + ' 项（可恢复）</button>' +
+      '</div>' +
+    '</div>' +
+    '<div class="bar-note">只会搬进插件自带的隔离区，不会销毁任何东西</div>' +
+  '</div>'
+}
+
+/* ---------- 变体 B：顶部结果卡 + 底栏 chip ---------- */
+function barB(){
+  var n = state.selected.size
+  var chip = (state.phase === 'done' && !state.resultDismissed)
+    ? '<span class="chip">本次 · 成功 ' + resultCounts().ok + ' · 失败 ' + resultCounts().fail + ' · 已在隔离区 ' + resultCounts().already +
+      ' <button class="disclose" data-open-bin style="color:#a8c4ff">查看</button></span>'
+    : ''
+  if (state.phase === 'running') {
+    var cur = state.results[state.runningAt-1]
+    return '<div class="bar">' +
+      '<div class="bar-main"><div class="progress">' +
+        '<span class="label">第 ' + state.runningAt + '/' + state.results.length + ' 项</span>' +
+        '<span class="title">' + esc(cur ? cur.title : '') + '</span>' +
+      '</div><div class="bar-actions"><button class="primary" disabled>正在隔离…</button></div></div>' +
+    '</div>'
+  }
+  return '<div class="bar">' +
+    '<div class="bar-main">' +
+      '<span class="bar-count">' + (n === 0 ? (chip || '未选择任何项') : '已选 <b>' + n + '</b> 项 · <span class="sum">' + fmt(totalSelectedBytes()) + '</span>') + '</span>' +
+      '<div class="bar-actions">' +
+        '<button class="ghost" data-all ' + (n === ALL_SAFE.length ? 'disabled' : '') + '>全选安全项（' + ALL_SAFE.length + '）</button>' +
+        '<button class="ghost" data-clear ' + (n === 0 ? 'disabled' : '') + '>清除选择</button>' +
+        '<button class="primary" data-run ' + (n === 0 ? 'disabled' : '') + '>隔离所选 ' + n + ' 项（可恢复）</button>' +
+      '</div>' +
+    '</div><div class="bar-note">只会搬进插件自带的隔离区，不会销毁任何东西</div>' +
+  '</div>'
+}
+
+/* ---------- 变体 C：底栏抽屉 ---------- */
+function barC(){
+  var n = state.selected.size
+  var c = resultCounts()
+  var open = state.drawerOpen
+  var drawer = ''
+  if (open && state.phase === 'done') {
+    drawer = '<div class="result" style="border:0;border-top:.5px solid var(--line-soft);border-radius:0;padding:8px 0 0">' +
+      '<div class="bar-note">逐项结果（本次 ' + state.results.length + ' 项）</div>' +
+      state.results.map(function(r){
+        var tone = r.status === 'ok' ? 'var(--ok)' : r.status === 'fail' ? 'var(--err)' : 'var(--warn)'
+        var word = r.status === 'ok' ? '已搬走' : r.status === 'fail' ? '失败：' + (r.why || '未知原因') : '已在隔离区'
+        return '<div class="item" style="font-size:11.5px;display:flex;gap:8px"><span style="color:' + tone + ';flex:none">' + word + '</span>' +
+          '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(r.title) + '</span></div>'
+      }).join('') + '</div>'
+  } else if (open && state.phase === 'running') {
+    drawer = '<div class="result" style="border:0;border-top:.5px solid var(--line-soft);border-radius:0;padding:8px 0 0">' +
+      state.results.map(function(r, i){
+        var done = r.status !== 'pending'
+        return '<div class="item" style="font-size:11.5px;display:flex;gap:8px">' +
+          '<span style="color:' + (done ? 'var(--ok)' : 'var(--muted)') + ';flex:none">' + (done ? '✓ 已搬走' : (i + 1 === state.runningAt ? '搬运中' : '排队中')) + '</span>' +
+          '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(r.title) + '</span></div>'
+      }).join('') + '</div>'
+  }
+  var head
+  if (state.phase === 'running') {
+    var cur = state.results[state.runningAt-1]
+    head = '<div class="progress"><span class="label">第 ' + state.runningAt + '/' + state.results.length + ' 项</span>' +
+      '<span class="title">' + esc(cur ? cur.title : '') + '</span>' +
+      '<span class="track"><span style="width:' + Math.round((state.runningAt-1)/state.results.length*100) + '%"></span></span></div>'
+  } else if (state.phase === 'done' && c.total > 0 && !state.resultDismissed) {
+    head = '<span class="bar-count">成功 <b>' + c.ok + '</b> · 失败 <b style="color:var(--err)">' + c.fail + '</b> · 已在隔离区 <b style="color:var(--warn)">' + c.already + '</b></span>'
+  } else {
+    head = '<span class="bar-count">' + (n === 0 ? '未选择任何项' : '已选 <b>' + n + '</b> 项 · <span class="sum">' + fmt(totalSelectedBytes()) + '</span>') + '</span>'
+  }
+  return '<div class="bar">' +
+    '<div class="bar-main">' + head +
+      '<div class="bar-actions">' +
+        (state.phase === 'done' && !state.resultDismissed
+          ? '<button class="ghost" data-drawer aria-expanded="' + open + '">' + (open ? '▾ 收起明细' : '▸ 明细') + '</button>' +
+            '<button class="ghost" data-open-bin>查看隔离区</button>' +
+            '<button class="ghost" data-dismiss>关闭</button>'
+          : '<button class="ghost" data-all ' + (n === ALL_SAFE.length ? 'disabled' : '') + '>全选安全项（' + ALL_SAFE.length + '）</button>' +
+            '<button class="ghost" data-clear ' + (n === 0 ? 'disabled' : '') + '>清除选择</button>' +
+            '<button class="primary" data-run ' + (state.phase === 'running' || n === 0 ? 'disabled' : '') + '>' +
+              (state.phase === 'running' ? '正在隔离…' : '隔离所选 ' + n + ' 项（可恢复）') + '</button>') +
+      '</div></div>' +
+    drawer +
+    (state.phase === 'running' ? '<div class="bar-note">处理中不可重复提交；明细随进度更新</div>' :
+      '<div class="bar-note">只会搬进插件自带的隔离区，不会销毁任何东西</div>') +
+  '</div>'
+}
+
+/* ---------- 顶部结果卡（变体 B） ---------- */
+function noticeCard(){
+  if (state.variant !== 'B' || state.phase !== 'done' || state.resultDismissed) return ''
+  return '<div class="notice-card">' + resultLine(false) + failDisclosure() +
+    '<div class="muted">不自动跳转；「查看隔离区」在底栏与这里都可用。</div></div>'
+}
+
+/* ---------- 整页 ---------- */
+function render(){
+  document.body.dataset.variant = state.variant
+  document.getElementById('stage').className = 'stage' + (state.narrow ? ' narrow' : '')
+  document.body.classList.toggle('narrow-mode', state.narrow)
+  document.getElementById('variant-label').textContent =
+    state.variant === 'A' ? 'A · 底栏内叠放结果' : state.variant === 'B' ? 'B · 顶部结果卡 + 底栏摘要' : 'C · 底栏抽屉明细'
+
+  var root = document.getElementById('root')
+  if (state.view === 'bin') {
+    root.innerHTML = renderBin()
+    return
+  }
+  var bar = state.variant === 'A' ? barA() : state.variant === 'B' ? barB() : barC()
+  var summary = '<div class="card"><div class="top">' +
+      '<div><b>3.41 GB</b><div class="muted">可回收</div></div>' +
+      '<div><b>1.22 GB</b><div class="muted">隔离区</div></div>' +
+      '<div><b class="net-pos">2.19 GB</b><div class="muted">净释放</div></div></div>' +
+      '<div class="muted">6 个会话 · 1 个孤儿附件 · 2 个可重建缓存 · 扫描 3 次</div>' +
+      '<div class="thr" role="group" aria-label="归档判定阈值">' +
+        '<button aria-pressed="false">7 天</button><button aria-pressed="false">14 天</button>' +
+        '<button aria-pressed="true">30 天</button><button aria-pressed="false">90 天</button>' +
+        '<span class="muted">超过阈值的已归档会话才算安全</span></div></div>'
+
+  var actions = '<div class="actions">' +
+      '<button class="btn" aria-pressed="true" data-view="audit">审计</button>' +
+      '<button class="btn" aria-pressed="false" data-view="bin">隔离区（3 批 · 1.22 GB）</button>' +
+      '<span style="flex:1"></span><span class="muted">扫描于 19:42</span>' +
+      '<button class="btn" data-rescan>重新扫描</button></div>'
+
+  var list = '<div class="card">' + renderTierCard() +
+    renderFold('confirm', '需确认', 'badge-confirm', CONFIRM.map(function(s){ return renderRow(s, { selectable:false, long:state.long }) }).join(''), '默认折叠 · 需逐项确认原因') +
+    renderFold('danger', '危险', 'badge-danger', DANGER.map(function(s){ return renderRow(s, { selectable:false, long:state.long }) }).join(''), '默认折叠 · 不可勾选') +
+    '</div>'
+
+  root.innerHTML = summary + noticeCard() + actions + list + renderClearables() +
+    '<div class="footer-slot" id="footer">' + bar + '</div>'
+
+  // 处理中自动滚到底栏可见（原型里内容固定，不必滚）
+}
+
+function renderBin(){
+  var c = resultCounts()
+  var rows = '<div class="card"><div class="tier-head"><span class="badge">隔离区</span><span class="muted">3 批 · 1.22 GB</span></div>' +
+    '<div class="row"><div class="row-head"><span class="row-id">batch-2026-11-02-1942</span>' +
+      '<span class="badge badge-safe">本次</span><span class="muted">' + c.ok + ' 项 · 18.3 MB</span></div>' +
+      '<div class="actions"><button class="btn">恢复</button></div>' +
+      '<div class="state-line" style="padding-left:0;color:var(--faint)">这一批来自刚才的「隔离所选」</div></div>' +
+    '<div class="row"><div class="row-head"><span class="row-id">batch-2026-10-21-0908</span>' +
+      '<span class="badge badge-safe">ok</span><span class="muted">9 项 · 1.02 GB</span></div>' +
+      '<div class="actions"><button class="btn">恢复</button></div></div>' +
+    '<div class="row"><div class="row-head"><span class="row-id">batch-2026-10-14-2210</span>' +
+      '<span class="badge badge-confirm">partial</span><span class="muted">4 项 · 214 MB</span></div>' +
+      '<div class="muted">1 项未能搬走：目录被占用</div>' +
+      '<div class="actions"><button class="btn">恢复</button></div></div>' +
+    '</div>'
+  return '<div class="actions" style="margin-bottom:12px"><button class="btn" aria-pressed="false" data-view="audit">审计</button>' +
+    '<button class="btn" aria-pressed="true" data-view="bin">隔离区（3 批 · 1.22 GB）</button></div>' + rows
+}
+
+/* ============================================================
+   交互
+   ============================================================ */
+document.addEventListener('click', function(e){
+  var el = e.target.closest('button, input')
+  if (!el) return
+  if (el.dataset.toggle !== undefined) {
+    var id = el.dataset.toggle
+    if (state.selected.has(id)) state.selected.delete(id); else state.selected.add(id)
+    state.phase = state.phase === 'done' ? 'idle' : state.phase
+    render()
+    return
+  }
+  if (el.hasAttribute('data-all')) {
+    state.selected = new Set(ALL_SAFE.map(function(x){ return x.id }))
+    state.phase = 'idle'; state.results = []
+    render()
+    announce('已选择 ' + state.selected.size + ' 项安全项')
+    return
+  }
+  if (el.hasAttribute('data-clear')) {
+    state.selected = new Set(); render()
+    announce('已清除选择')
+    return
+  }
+  if (el.hasAttribute('data-run')) { startRun(); return }
+  if (el.hasAttribute('data-fold')) {
+    state.folded[el.dataset.fold] = !state.folded[el.dataset.fold]
+    render(); return
+  }
+  if (el.hasAttribute('data-fails')) { state.failsOpen = !state.failsOpen; render(); return }
+  if (el.hasAttribute('data-drawer')) { state.drawerOpen = !state.drawerOpen; render(); return }
+  if (el.hasAttribute('data-dismiss')) { state.resultDismissed = true; render(); return }
+  if (el.hasAttribute('data-open-bin')) { state.view = 'bin'; render(); return }
+  if (el.dataset.view) { state.view = el.dataset.view; render(); return }
+  if (el.hasAttribute('data-rescan')) { announce('重新扫描中…'); return }
+})
+
+/* URL 复现演示状态 */
+function applyParams(){
+  var s = params.get('state') || 'idle'
+  var at = Number(params.get('at') || 0)
+  if (s === 'idle0') { state.selected = new Set(); state.phase = 'idle' }
+  if (s === 'idle') {
+    var n = Number(params.get('sel') || 4)
+    state.selected = new Set(ALL_SAFE.slice(0, n).map(function(x){ return x.id }))
+    state.phase = 'idle'
+  }
+  if (s === 'running' || s === 'done') {
+    state.selected = new Set(ALL_SAFE.map(function(x){ return x.id }))
+    var items = selectedItems()
+    state.results = items.map(function(item){
+      return { id:item.id, title:titleOf(item), size:item.size, status:'pending', why:item.why }
+    })
+    var runTo = s === 'done' ? state.results.length : Math.max(1, Math.min(at || 3, state.results.length))
+    for (var i = 0; i < runTo; i++) {
+      var item = rowById(state.results[i].id)
+      state.results[i].status = item && item.sim === 'fail' ? 'fail' : item && item.sim === 'already' ? 'already' : 'ok'
+    }
+    if (s === 'done') { state.phase = 'done'; state.selected = new Set() }
+    else { state.phase = 'running'; state.runningAt = Math.min(runTo + 1, state.results.length) }
+    state.drawerOpen = params.get('drawer') === '1'
+  }
+  if (params.get('folds') === 'open') { state.folded.confirm = false; state.folded.danger = false }
+}
+
+/* 浮层：变体切换 + 演示状态 */
+function setParam(key, value){
+  var p = new URLSearchParams(location.search)
+  if (value === null) p.delete(key); else p.set(key, value)
+  history.replaceState(null, '', location.pathname + (p.toString() ? '?' + p.toString() : ''))
+}
+function applyVariant(v){
+  state.variant = v
+  setParam('variant', v)
+  document.getElementById('prev').setAttribute('aria-label', '上一个变体')
+  render()
+}
+document.getElementById('prev').addEventListener('click', function(){
+  applyVariant(state.variant === 'A' ? 'C' : state.variant === 'B' ? 'A' : 'B')
+})
+document.getElementById('next').addEventListener('click', function(){
+  applyVariant(state.variant === 'A' ? 'B' : state.variant === 'B' ? 'C' : 'A')
+})
+document.addEventListener('keydown', function(e){
+  var tag = document.activeElement && document.activeElement.tagName
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || (document.activeElement && document.activeElement.isContentEditable)) return
+  if (e.key === 'ArrowLeft') document.getElementById('prev').click()
+  if (e.key === 'ArrowRight') document.getElementById('next').click()
+})
+
+document.querySelectorAll('[data-state]').forEach(function(btn){
+  btn.addEventListener('click', function(){
+    if (state.phase === 'running') return   // 处理中不允许跳状态（原型也守重入）
+    var s = btn.dataset.state
+    state.view = 'audit'; state.resultDismissed = false; state.failsOpen = false
+    state.results = []; state.drawerOpen = false
+    if (s === 'idle0') { state.phase = 'idle'; state.selected = new Set() }
+    if (s === 'idle') { state.phase = 'idle'; state.selected = new Set(ALL_SAFE.map(function(x){ return x.id })) }
+    if (s === 'running' || s === 'done') {
+      state.selected = new Set(ALL_SAFE.map(function(x){ return x.id }))
+      var items = selectedItems()
+      state.results = items.map(function(item){
+        return { id:item.id, title:titleOf(item), size:item.size, status:'pending', why:item.why }
+      })
+      var runTo = s === 'done' ? state.results.length : 3
+      for (var i = 0; i < runTo; i++) {
+        var it = rowById(state.results[i].id)
+        state.results[i].status = it && it.sim === 'fail' ? 'fail' : it && it.sim === 'already' ? 'already' : 'ok'
+      }
+      if (s === 'done') { state.phase = 'done'; state.selected = new Set() }
+      else { state.phase = 'running'; state.runningAt = Math.min(runTo + 1, state.results.length); state.drawerOpen = state.variant === 'C' }
+    }
+    setParam('state', s); setParam('at', null)
+    render()
+  })
+})
+document.getElementById('narrow-btn').addEventListener('click', function(){
+  state.narrow = !state.narrow; setParam('narrow', state.narrow ? '1' : null); render()
+})
+document.getElementById('long-btn').addEventListener('click', function(){
+  state.long = !state.long; setParam('long', state.long ? '1' : null); render()
+})
+document.querySelectorAll('.nav a').forEach(function(a){ a.addEventListener('click', function(e){ e.preventDefault() }) })
+
+applyParams()
+render()
+if (params.get('scroll') === 'bottom') {
+  var box = document.getElementById('options')
+  box.scrollTop = box.scrollHeight
+}
+if (params.get('debug') === 'boxes') {
+  var dlg = document.querySelector('.dialog').getBoundingClientRect()
+  var opt = document.getElementById('options')
+  var optR = opt.getBoundingClientRect()
+  var foot = document.querySelector('.footer-slot').getBoundingClientRect()
+  var root = document.querySelector('.root').getBoundingClientRect()
+  var probes = [dlg.bottom - 4, foot.bottom - 2, foot.top + 2, optR.top + 10]
+  var lines = ['dialog ' + Math.round(dlg.top) + '-' + Math.round(dlg.bottom) +
+    ' | options ' + Math.round(optR.top) + '-' + Math.round(optR.bottom) +
+    ' scrollTop=' + Math.round(opt.scrollTop) + ' h=' + Math.round(opt.scrollHeight) +
+    ' | root ' + Math.round(root.top) + '-' + Math.round(root.bottom) +
+    ' | footer ' + Math.round(foot.top) + '-' + Math.round(foot.bottom)]
+  probes.forEach(function(y){
+    var el = document.elementFromPoint(dlg.left + dlg.width / 2, y)
+    lines.push('y=' + Math.round(y) + ' -> ' + (el ? el.tagName + '.' + (el.className || '') + ' :: ' + (el.textContent || '').slice(0, 40) : 'null'))
+  })
+  var folds = [].slice.call(document.querySelectorAll('[data-fold]')).map(function(b){
+    return b.dataset.fold + '=' + b.getAttribute('aria-expanded') + ':' +
+      (b.parentNode.querySelector('.fold-body') ? b.parentNode.querySelector('.fold-body').children.length : 0)
+  })
+  lines.push('folds ' + folds.join('  '))
+  var pre = document.createElement('pre')
+  pre.style.cssText = 'position:fixed;left:8px;top:8px;z-index:999;background:#000;color:#0f0;font-size:10px;padding:8px;max-width:600px;white-space:pre-wrap'
+  pre.textContent = lines.join('\n')
+  document.body.appendChild(pre)
+}
+</script>
+</body>
+</html>
