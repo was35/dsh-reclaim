@@ -70,6 +70,8 @@ const loaded = (() => {
     classifyUrl: panel.classifyUrl,
     formatClock: panel.formatClock,
     shouldRescanAfter: panel.shouldRescanAfter,
+    rememberReceipt: panel.rememberReceipt,
+    summarizeReceipts: panel.summarizeReceipts,
   }
 })()
 
@@ -729,4 +731,152 @@ test('the copy in this bundle and the shared dictionary agree on the renamed act
       assert.ok(!text.includes(word), `zh:${key} still says "${word}": ${text}`)
     }
   }
+})
+
+/** One batch exactly as `listBatches` describes it to the panel. */
+function binBatch(overrides = {}) {
+  return {
+    kind: 'ok',
+    batchId: 'b1',
+    batchDir: '/home/.dsh-reclaim-trash/b1',
+    createdAt: '2026-02-01T00:00:00.000Z',
+    entries: 7,
+    sessionIds: ['s-1'],
+    files: 30,
+    bytes: 1048576,
+    reason: null,
+    ...overrides,
+  }
+}
+
+/** One batch's permanent-delete outcome, as the panel keeps it after the click. */
+function receipt(overrides = {}) {
+  return {
+    batchId: 'b1',
+    ok: true,
+    entries: 7,
+    files: 30,
+    bytes: 1048576,
+    failures: [],
+    reason: null,
+    at: '2026-02-01T00:00:01.000Z',
+    ...overrides,
+  }
+}
+
+test('a batch being permanently deleted says what it is deleting and that it cannot be stopped', () => {
+  // The server deletes a batch in one verified tree walk, so there is no per-item progress to
+  // paint and no way to cancel it. What the row can honestly say is the size it is working on
+  // and the fact that the click already committed it.
+  const tree = render(reportWith({}), { view: 'bin', trash: { ok: true, batches: [binBatch()] }, busy: 'purge:b1' })
+  const row = walk(tree).find((node) => node.props?.['data-dshr-batch'] === 'b1')
+  assert.notEqual(row, undefined, 'the batch being purged vanished from the list')
+  assert.equal(row.props['aria-busy'], 'true')
+  assert.match(textOf(row), /正在彻底删除… 共 7 项 · 1\.0 MB；开始后无法取消。/)
+  assert.notEqual(
+    walk(row).find((node) => String(node.props?.className ?? '').includes('dshr-spinner')),
+    undefined,
+    'a running purge showed no activity indicator',
+  )
+  const destroy = walk(row).find((node) => node.props?.['data-dshr-destructive'] !== undefined)
+  assert.equal(destroy.props.disabled, true, 'a second click could start a second purge')
+  assert.match(textOf(destroy), /正在彻底删除…/)
+
+  const announcer = walk(tree).find((node) => node.props?.['data-dshr-announcer'] !== undefined)
+  assert.match(textOf(announcer), /正在彻底删除 7 项（1\.0 MB）…/)
+})
+
+test('a finished purge leaves its numbers behind after the batch itself is gone', () => {
+  // The reload a purge triggers replaces the batch list, and a successful purge removes the
+  // batch it describes. Keeping the outcome in that list would erase it at the moment it
+  // becomes true; the record is separate state for this reason.
+  const tree = render(reportWith({}), { view: 'bin', trash: { ok: true, batches: [] }, receipts: [receipt()] })
+  const card = walk(tree).find((node) => node.props?.['data-dshr-purge-result'] === 'b1:ok')
+  assert.notEqual(card, undefined, 'the outcome of a purge disappeared when its batch did')
+  assert.match(textOf(card), /已删除 7 项 · 1\.0 MB（30 个文件）/)
+
+  const summary = walk(tree).find((node) => node.props?.['data-dshr-purge-summary'] !== undefined)
+  assert.equal(summary.props['data-dshr-purge-summary'], '1:7:1048576')
+  assert.match(textOf(summary), /本次已彻底删除 1 批 · 7 项 · 1\.0 MB/)
+
+  const announcer = walk(tree).find((node) => node.props?.['data-dshr-announcer'] !== undefined)
+  assert.match(textOf(announcer), /本批已彻底删除 7 项（1\.0 MB）。/)
+})
+
+test('a batch that failed to clear keeps its reasons and is not counted as deleted', () => {
+  const failed = receipt({
+    batchId: 'b2',
+    ok: false,
+    entries: 0,
+    files: 3,
+    bytes: 0,
+    failures: ['/p/a (unlink EACCES)', '/p/b (rmdir EBUSY)'],
+    reason: 'leftovers',
+  })
+  const tree = render(reportWith({}), {
+    view: 'bin',
+    trash: { ok: true, batches: [binBatch({ batchId: 'b2', kind: 'incomplete', reason: 'manifest says incomplete', entries: 5 })] },
+    receipts: [failed],
+  })
+
+  const card = walk(tree).find((node) => node.props?.['data-dshr-purge-result'] === 'b2:fail')
+  assert.notEqual(card, undefined)
+  assert.match(textOf(card), /未完全删除/)
+  const details = walk(card).find((node) => node.type === 'details')
+  assert.notEqual(details, undefined, 'the failure had no expander')
+  assert.match(textOf(details.children[0]), /失败位置 \(2\)/)
+  assert.match(textOf(details), /unlink EACCES/)
+
+  const summary = walk(tree).find((node) => node.props?.['data-dshr-purge-summary'] !== undefined)
+  assert.equal(summary.props['data-dshr-purge-summary'], '0:0:0', 'a failed batch was counted as deleted space')
+  assert.match(textOf(summary), /本次已彻底删除 0 批 · 0 项/)
+  assert.match(textOf(summary), /另有 1 批未完全删除/)
+
+  // The batch is still listed (nothing was deleted), so its row keeps the destructive action.
+  const row = walk(tree).find((node) => node.props?.['data-dshr-batch'] === 'b2')
+  assert.notEqual(row, undefined)
+  assert.equal(walk(row).find((node) => node.props?.['data-dshr-destructive'] !== undefined).props.disabled, false)
+})
+
+test('the session-wide tally can be cleared without touching the quarantine', () => {
+  let cleared = 0
+  const tree = render(
+    reportWith({}),
+    { view: 'bin', trash: { ok: true, batches: [binBatch()] }, receipts: [receipt()] },
+    {
+      clearReceipts: () => {
+        cleared += 1
+      },
+    },
+  )
+  const button = walk(tree).find((node) => node.props?.['data-dshr-purge-clear'] !== undefined)
+  assert.notEqual(button, undefined)
+  assert.match(textOf(button), /清除本次记录/)
+  button.props.onClick()
+  assert.equal(cleared, 1)
+})
+
+test('a retried batch replaces its earlier outcome instead of counting it twice', () => {
+  const once = loaded.rememberReceipt([], receipt())
+  const twice = loaded.rememberReceipt(once, receipt({ ok: false, at: '2026-02-01T00:00:02.000Z' }))
+  assert.equal(twice.length, 1, 'the same batch was recorded twice')
+  assert.equal(twice[0].ok, false, 'the newer outcome did not replace the older one')
+
+  const other = loaded.rememberReceipt(twice, receipt({ batchId: 'b9' }))
+  assert.equal(other.length, 2)
+  const totals = loaded.summarizeReceipts(other)
+  // Field by field: the tally is built inside the panel's realm, so its prototype is not this
+  // realm's Object.prototype and a strict deep comparison would fail on that alone.
+  assert.equal(totals.batches, 1)
+  assert.equal(totals.entries, 7)
+  assert.equal(totals.bytes, 1048576)
+  assert.equal(totals.files, 30)
+  assert.equal(totals.failedBatches, 1)
+})
+
+test('the permanent-delete record belongs to the quarantine view, not the audit page', () => {
+  const tree = render(reportWith({}), { view: 'audit', receipts: [receipt()] })
+  assert.equal(walk(tree).find((node) => node.props?.['data-dshr-purge-result'] !== undefined), undefined)
+  const announcer = walk(tree).find((node) => node.props?.['data-dshr-announcer'] !== undefined)
+  assert.equal(textOf(announcer), '', 'an audit view announced a purge that is not on screen')
 })
