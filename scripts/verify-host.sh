@@ -69,7 +69,7 @@ echo "== host loop: dsh $("$DSH_BIN" --version 2>/dev/null || echo '?')  home=$V
 rm -rf "$VERIFY_HOME" "$BOOT_LOG" "$COOKIE_JAR"
 export DSH_HOME="$VERIFY_HOME"
 
-echo "-- 1/5 init the '$PROFILE' profile${TEMPLATE:+ from the '$TEMPLATE' template}"
+echo "-- 1/6 init the '$PROFILE' profile${TEMPLATE:+ from the '$TEMPLATE' template}"
 if [ -n "$TEMPLATE" ]; then
   "$DSH_BIN" --profile "$PROFILE" --from-default-profile "$TEMPLATE" --dump-config >/dev/null 2>&1 || {
     echo "FATAL: could not create profile '$PROFILE' from template '$TEMPLATE'." >&2
@@ -86,10 +86,10 @@ else
   }
 fi
 
-echo "-- 2/5 install the plugin from this working tree"
+echo "-- 2/6 install the plugin from this working tree"
 "$DSH_BIN" plugin --profile "$PROFILE" add "file:$REPO_ROOT" >/dev/null 2>&1
 
-echo "-- 3/5 boot"
+echo "-- 3/6 boot"
 "$DSH_BIN" --profile "$PROFILE" --port "$PORT" --no-open >"$BOOT_LOG" 2>&1 &
 HOST_PID=$!
 
@@ -117,7 +117,7 @@ if grep -q "did not activate" "$BOOT_LOG"; then
   exit 1
 fi
 
-echo "-- 4/5 probe /health"
+echo "-- 4/6 probe /health"
 curl -sS -c "$COOKIE_JAR" -L -o /dev/null "http://127.0.0.1:$PORT/?token=$TOKEN"
 curl -sS -b "$COOKIE_JAR" "http://127.0.0.1:$PORT/api/dsh-reclaim/health" -o "$VERIFY_HOME.health.json"
 
@@ -180,7 +180,10 @@ node -e '
 
 echo "PASS: the plugin mounted on the real host and every capability it needs is present."
 
-echo "-- 5/5 clear a rebuildable cache family and restore it"
+echo "-- 5/6 replay the #18 field report: nine sessions, one repeat click"
+node "$REPO_ROOT/scripts/verify-reentry.mjs" --port "$PORT" --jar "$COOKIE_JAR"
+
+echo "-- 6/6 clear a rebuildable cache family and restore it"
 node "$REPO_ROOT/scripts/verify-clear.mjs" --port "$PORT" --jar "$COOKIE_JAR"
 
 cleanup

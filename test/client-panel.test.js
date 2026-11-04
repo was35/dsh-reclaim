@@ -16,64 +16,34 @@
  * acceptance criterion, and it is checked here for the rows phase two made clearable.
  */
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
-import { createContext, runInContext } from 'node:vm'
 
 import { translatePanel } from '../lib/messages.js'
-
-const SOURCE = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
-
-/** The smallest React this panel uses: `createElement`, and nothing else. */
-function fakeReact() {
-  function flatten(value, out) {
-    if (value === null || value === undefined || typeof value === 'boolean') return out
-    if (Array.isArray(value)) {
-      for (const item of value) flatten(item, out)
-      return out
-    }
-    out.push(value)
-    return out
-  }
-  return {
-    createElement(type, props) {
-      const children = []
-      for (let index = 2; index < arguments.length; index += 1) flatten(arguments[index], children)
-      return { type, props: props ?? {}, children }
-    },
-  }
-}
+import { loadPanel } from './hooks/panel-harness.mjs'
 
 /**
- * Evaluate the bundle the way the page does, and hand back the test seam.
+ * The bundle, evaluated the way the page evaluates it.
  *
- * Evaluated ONCE at module scope: the file registers its factory on load, and evaluating it
- * twice produces two plugin instances, which is exactly the failure the seam's own comment
- * warns about.
+ * The evaluation itself lives in `test/hooks/panel-harness.mjs`, because a second caller needs
+ * the same bundle: the host-level check in `scripts/verify-reentry.mjs` asks the real panel what
+ * it would say about responses a real host produced. It is evaluated ONCE per process, because
+ * evaluating it twice produces two plugin instances.
  */
 const loaded = (() => {
-  const react = fakeReact()
-  let registration = null
-  const sandbox = { console, window: { __ModuleLoader__: { load: (spec) => { registration = spec } } } }
-  runInContext(SOURCE, createContext(sandbox))
-  assert.notEqual(registration, null, 'the panel never registered a factory')
-  const plugin = registration.factory((name) => {
-    if (name === 'react') return react
-    throw new Error(`unexpected require(${name})`)
-  })
-  const panel = sandbox.__dshReclaimPanel
-  assert.notEqual(panel, undefined, 'the panel exposed no test seam')
+  const { react, plugin, seam } = loadPanel()
   return {
     react,
     plugin,
-    renderPanel: panel.renderPanel,
-    classifyUrl: panel.classifyUrl,
-    formatClock: panel.formatClock,
-    shouldRescanAfter: panel.shouldRescanAfter,
-    rememberReceipt: panel.rememberReceipt,
-    summarizeReceipts: panel.summarizeReceipts,
-    selectableSafeIds: panel.selectableSafeIds,
-    selectableArtifactIds: panel.selectableArtifactIds,
+    renderPanel: seam.renderPanel,
+    classifyUrl: seam.classifyUrl,
+    formatClock: seam.formatClock,
+    shouldRescanAfter: seam.shouldRescanAfter,
+    rememberReceipt: seam.rememberReceipt,
+    summarizeReceipts: seam.summarizeReceipts,
+    summarizeRun: seam.summarizeRun,
+    unavailableFromRun: seam.unavailableFromRun,
+    selectableSafeIds: seam.selectableSafeIds,
+    selectableArtifactIds: seam.selectableArtifactIds,
   }
 })()
 
@@ -715,6 +685,57 @@ test('a row a run proved unactionable is shown disabled with its reason', () => 
 })
 
 
+test('the same batch submitted twice reads as "already in the quarantine", not as nine failures', () => {
+  // The field report behind #22: nine sessions were submitted, eight had already been moved
+  // and the ninth had been deleted outright. Submitting them again must not read as
+  // "0 of 9, 9 failed" — eight are recoverable in the quarantine, one is simply gone.
+  const moved = 'aaaaaaaa-0000-0000-0000-000000000000'
+  const gone = 'bbbbbbbb-0000-0000-0000-000000000000'
+  const results = [
+    ...Array.from({ length: 8 }, () => ({
+      id: moved,
+      ok: false,
+      body: {
+        ok: false,
+        sourceGone: true,
+        alreadyInQuarantine: { batchId: '2026-11-04T11-19-58', createdAt: '2026-11-04T11:19:58.000Z' },
+        plan: { blockers: [{ code: 'session-dir-not-found' }] },
+      },
+    })),
+    {
+      id: gone,
+      ok: false,
+      body: {
+        ok: false,
+        sourceGone: true,
+        alreadyInQuarantine: null,
+        plan: { blockers: [{ code: 'session-dir-not-found' }] },
+      },
+    },
+  ]
+
+  const summary = loaded.summarizeRun(results)
+  assert.equal(summary.total, 9)
+  assert.equal(summary.moved, 0, 'nothing moved on the second submission')
+  assert.equal(summary.already, 8, 'eight were already in the quarantine')
+  assert.equal(summary.failed, 1, 'only the deleted one failed')
+  assert.equal(summary.quarantined.length, 8)
+  // The panel's arrays come from the bundle's own realm, so they are copied out before they
+  // are compared: an array built inside the vm is not the same kind of array as one built here.
+  assert.deepEqual(Array.from(summary.failures, (failure) => failure.id), [gone])
+  assert.deepEqual(Array.from(summary.failures[0].codes), ['session-dir-not-found'])
+
+  // The rows that run proved unactionable leave the selectable set, so the panel cannot offer
+  // the very click that just failed.
+  const unavailable = loaded.unavailableFromRun(summary)
+  assert.equal(unavailable.get(moved), 'row.inQuarantine')
+  assert.equal(unavailable.get(gone), 'row.sourceGone')
+
+  const report = reportWith({ sessions: { safe: [tierRow(moved, 'safe'), tierRow(gone, 'safe')] } })
+  assert.deepEqual(Array.from(loaded.selectableSafeIds(report, unavailable)), [])
+})
+
+
 test('the copy in this bundle and the shared dictionary agree on the renamed actions', () => {
   // `lib/client.js` carries a hand-written copy of the copy (`INLINE_MESSAGES`), because the
   // host's locale service may answer with the key itself and `t()` then falls back to it. Two
@@ -763,6 +784,20 @@ test('the copy in this bundle and the shared dictionary agree on the renamed act
     }
   }
 
+
+  // The same goes for the `reason.*` family. The result bar explains a refusal by its code,
+  // so a code only one copy can translate is a refusal the user reads as an English sentence
+  // in a Chinese panel - which is what happened to `session-dir-not-found` in #18.
+  const reasonKeys = Object.keys(inline.zh).filter((key) => key.startsWith('reason.'))
+  assert.ok(reasonKeys.length > 0, 'the inline dictionary has no reason.* keys to compare')
+  for (const key of reasonKeys) {
+    for (const locale of ['zh', 'en']) {
+      const fromBundle = loaded.plugin.__messages.translatePanel(locale, key, params)
+      const fromShared = translatePanel(locale, key, params)
+      assert.notEqual(fromShared, key, `${locale}:${key} is missing from lib/messages.js`)
+      assert.equal(fromBundle, fromShared, `${locale}:${key} drifted between lib/client.js and lib/messages.js`)
+    }
+  }
   // And the retired words are not hiding in this copy either.
   const retired = ['彻底清空', '清理所选', '搬运中', '已搬走', '仍要清理']
   for (const key of Object.keys(inline.zh)) {
