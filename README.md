@@ -27,6 +27,13 @@ DSH 官方明确**不回收**附件。`@deepseek-ai/dsh-attachment-local` 的 RE
 - 清理**不是删除**：数据搬进插件自带的隔离区，可随时恢复。唯一不可恢复的动作，是你在界面上对某一批明确选择**彻底删除**——它只销毁隔离区里**已经搬进去的**批次，不碰活数据
 - 只读的 Agent 审计工具（模型能查、不能删）
 
+## 与 @michengai/dsh-archive-manager 的协同
+
+本插件可作为成熟会话管理插件 [`@michengai/dsh-archive-manager`](https://github.com/MichengAI/dsh-archive-manager) 的伴生扩展（Companion Extension）：
+- **会话业务管理归 archive-manager**：正常归档、恢复、收藏与会话本体物理删除由 `@michengai/dsh-archive-manager` 统一负责，保持上游完全跟随官方原版更新。
+- **盲区深层产物治理归 dsh-reclaim**：上游删除会话时无法触及的**孤儿附件文件（Attachments）、派生缓存（Caches）、暂存残留**由本插件统一接管，并提供“可逆移入隔离区”的安全兜底。
+- **零冲突**：本插件剥离自身直接删除活动会话的冗余逻辑，专注于存储下水管道清理，两插件协同运行且无记账冲突（见 [ADR 0001](docs/adr/0001-archive-manager-companion.md) 与 [docs/safety.md](docs/safety.md)）。
+
 ## 安装
 
 装进一个**带 web 层**的 profile（也就是平时用来开界面的那个）：

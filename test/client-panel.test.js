@@ -44,6 +44,8 @@ const loaded = (() => {
     unavailableFromRun: seam.unavailableFromRun,
     selectableSafeIds: seam.selectableSafeIds,
     selectableArtifactIds: seam.selectableArtifactIds,
+    setupCompanionNotification: seam.setupCompanionNotification,
+    showCompanionToast: seam.showCompanionToast,
   }
 })()
 
@@ -286,6 +288,15 @@ test('an attachment still referenced by a session is never offered for clearing'
 test('with nothing to show the clearables card is absent, not empty', () => {
   const tree = render(reportWith({}))
   assert.equal(walk(tree).some((node) => node.props?.['data-dshr-clearables'] === 'true'), false)
+})
+
+test('companion mode banner is rendered at the top of the panel', () => {
+  const tree = render(reportWith({}))
+  const companionNode = walk(tree).find((node) => node.props?.['data-dshr-companion'] === 'true')
+  assert.notEqual(companionNode, null, 'companion card must be rendered')
+  const text = textOf(companionNode)
+  assert.match(text, /伴生协同/)
+  assert.match(text, /@michengai\/dsh-archive-manager/)
 })
 
 test('an archived session wears a badge beside its title, not a word among the metrics', () => {
@@ -1217,5 +1228,68 @@ test('the artifact select-all and the session select-all are two controls, not o
   // say which is which.
   assert.equal(textOf(buttonBy(tree, 'data-dshr-select-safe')), '全选安全项（1）')
   assert.equal(textOf(buttonBy(tree, 'data-dshr-select-safe-artifacts')), '全选安全产物（1）')
+})
+
+test('showCompanionToast mounts alert toast to document body on session removal signal', () => {
+  // Simulate DOM document
+  const createdElements = []
+  const mockBody = {
+    appendChild: (el) => {
+      mockBody.children.push(el)
+      el.parentNode = mockBody
+      return el
+    },
+    removeChild: (el) => {
+      const idx = mockBody.children.indexOf(el)
+      if (idx !== -1) mockBody.children.splice(idx, 1)
+      el.parentNode = null
+      return el
+    },
+    children: [],
+  }
+  const mockDoc = {
+    body: mockBody,
+    getElementById: (id) => mockBody.children.find((c) => c.id === id) || null,
+    createElement: (tag) => {
+      const el = {
+        tag,
+        id: '',
+        className: '',
+        attrs: {},
+        style: {},
+        textContent: '',
+        children: [],
+        parentNode: null,
+        setAttribute: (k, v) => { el.attrs[k] = v },
+        appendChild: (child) => {
+          el.children.push(child)
+          child.parentNode = el
+          return child
+        },
+      }
+      createdElements.push(el)
+      return el
+    },
+  }
+
+  const mockWindow = {
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  }
+
+  const helper = loaded.setupCompanionNotification(
+    { locale: { get: () => 'zh' } },
+    undefined,
+    mockDoc,
+    mockWindow,
+  )
+
+  assert.ok(mockWindow.__DSH_RECLAIM_COMPANION__, 'must expose companion helper on window')
+  mockWindow.__DSH_RECLAIM_COMPANION__.notifySessionRemoved('test-session-123')
+
+  const toast = mockDoc.getElementById('dshr-companion-toast')
+  assert.notEqual(toast, null, 'toast element must be appended to body')
+  assert.equal(toast.attrs['data-dshr-toast'], 'session-removed')
+  assert.ok(toast.children.some((c) => c.textContent && c.textContent.includes('会话已删除')))
 })
 

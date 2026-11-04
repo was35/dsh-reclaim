@@ -280,3 +280,26 @@ test('deleteSession refuses an invalid sessionId and moves nothing', async () =>
     rmSync(layout.home, { recursive: true, force: true })
   }
 })
+
+test('deleteSession refuses physical move when session delete is delegated to archive-manager', async () => {
+  const { dir, layout } = homeWithSession()
+  try {
+    const result = await deleteSession(ctxWithoutLiveSessions(), {
+      layout,
+      sessionId: TARGET,
+      dryRun: false,
+      referenceGraph: { ok: true, orphanDetermination: { allowed: true }, sessionEdges: [], attachments: [], sessions: [] },
+    })
+
+    assert.equal(result.ok, false)
+    assert.equal(result.move, null)
+    assert.ok(
+      result.plan.blockers.some((b) => b.code === 'session-delete-delegated'),
+      `expected session-delete-delegated blocker; got ${JSON.stringify(result.plan.blockers)}`,
+    )
+    assert.equal(existsSync(dir), true)
+    assert.equal(existsSync(join(layout.trash.root)), false)
+  } finally {
+    rmSync(layout.home, { recursive: true, force: true })
+  }
+})

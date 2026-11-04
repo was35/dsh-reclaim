@@ -98,6 +98,12 @@ test('the renamed actions read the same in the source dictionary', () => {
   assert.equal(zh('bin.destroying'), '正在彻底删除…')
   assert.equal(en('bin.destroying'), 'Deleting permanently…')
 
+  // Rejection reasons are translated and never fall back to server raw English
+  assert.equal(zh('reason.referenced-by-other-session'), '被其他保留会话引用，删掉会破坏那些会话的引用')
+  assert.equal(zh('reason.reference-graph-incomplete'), '引用图谱未能证明完整（存在不可读或损坏的日志），服务端保守拒绝移动')
+  assert.equal(zh('reason.owns-jobs'), '会话仍持有正在运行的后台任务，无法被清理')
+  assert.equal(zh('reason.session-delete-delegated'), '会话删除已由 @michengai/dsh-archive-manager 接管，本插件专注于清理遗留孤儿附件与缓存')
+
   // Progress and results use the same verb as the button that started them.
   assert.equal(zh('run.moved', { count: 2 }), '已隔离 2 项')
   assert.equal(en('run.moved', { count: 2 }), 'Quarantined 2')

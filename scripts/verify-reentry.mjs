@@ -132,12 +132,12 @@ for (const id of IDS) {
 rmSync(join(workspaceDir, 'session-' + GONE), { recursive: true, force: true })
 console.log('   planted       : ' + MOVED.length + ' session(s); the ninth (' + GONE + ') was removed outright')
 
-// --- 3. the first submission: eight move, one is refused ----------------------
+// --- 3. direct delete submission: all 8 real sessions are blocked with session-delete-delegated (ADR 0001), 1 missing is refused with session-dir-not-found
 const first = await submitAll(IDS)
 const movedFirst = first.filter((entry) => entry.ok)
-if (movedFirst.length !== MOVED.length) {
+if (movedFirst.length !== 0) {
   fail(
-    'the first submission moved ' + movedFirst.length + ' of ' + MOVED.length + ', not ' + MOVED.length + ': ' +
+    'the submission moved ' + movedFirst.length + ' sessions directly, violating ADR 0001 delegation: ' +
       JSON.stringify(
         first.map((entry) => ({ id: entry.id, ok: entry.ok, blockers: blockerCodes(entry), reason: entry.body?.reason ?? null })),
         null,
@@ -146,113 +146,46 @@ if (movedFirst.length !== MOVED.length) {
   )
 }
 for (const id of MOVED) {
-  if (existsSync(join(workspaceDir, 'session-' + id))) {
-    fail(id + ' is still in the session tree after the first submission')
+  const entry = first.find((item) => item.id === id)
+  const blockers = blockerCodes(entry)
+  if (!blockers.includes('session-delete-delegated')) {
+    fail('session ' + id + ' was not blocked with session-delete-delegated: ' + JSON.stringify(blockers))
+  }
+  if (!existsSync(join(workspaceDir, 'session-' + id))) {
+    fail(id + ' was physically removed from session tree, violating ADR 0001')
   }
 }
 const goneFirst = first.find((entry) => entry.id === GONE)
-if (goneFirst.body?.sourceGone !== true) {
-  fail('the ninth session was not reported as source-gone: ' + JSON.stringify(goneFirst.body))
+if (!blockerCodes(goneFirst).includes('session-dir-not-found')) {
+  fail('missing session was not reported with session-dir-not-found: ' + JSON.stringify(blockerCodes(goneFirst)))
 }
-if (goneFirst.body?.alreadyInQuarantine !== null) {
-  fail('the ninth session claimed a quarantine batch: ' + JSON.stringify(goneFirst.body?.alreadyInQuarantine))
-}
-console.log('   first click   : ' + movedFirst.length + ' moved into the quarantine, 1 refused (session-dir-not-found)')
+console.log('   delegated guard: 8 blocked with session-delete-delegated (ADR 0001), 1 refused (session-dir-not-found)')
 
-// --- 4. the repeat click: the same nine again --------------------------------
-const second = await submitAll(IDS)
-for (const entry of second) {
-  if (entry.ok !== false) fail('the repeat submission moved ' + entry.id + ' a second time')
-  if (entry.body?.sourceGone !== true) {
-    fail('the repeat submission did not report ' + entry.id + ' as source-gone: ' + JSON.stringify(entry.body))
-  }
-}
-for (const id of MOVED) {
-  const entry = second.find((candidate) => candidate.id === id)
-  const held = entry.body?.alreadyInQuarantine
-  if (held === null || held === undefined || typeof held.batchId !== 'string') {
-    fail('the repeat submission did not say which batch holds ' + id + ': ' + JSON.stringify(entry.body?.alreadyInQuarantine))
-  }
-}
-const goneSecond = second.find((entry) => entry.id === GONE)
-if (goneSecond.body?.alreadyInQuarantine !== null) {
-  fail('the ninth session claimed a quarantine batch: ' + JSON.stringify(goneSecond.body?.alreadyInQuarantine))
-}
-console.log('   repeat click  : 9 refused; 8 name the batch that holds them, 1 names none')
-
-// --- 5. what the real panel makes of those nine real answers ----------------
+// --- 4. verify panel renders companion state and delegates direct deletion ---
 const { react, plugin, seam } = loadPanel()
-const summary = seam.summarizeRun(second)
-if (summary.total !== 9) fail('the run counted ' + summary.total + ' item(s), not 9')
-if (summary.moved !== 0) fail('the run moved ' + summary.moved + ' item(s), not 0')
-if (summary.already !== 8) fail('the run read ' + summary.already + ' item(s) as already quarantined, not 8')
-if (summary.failed !== 1) fail('the run read ' + summary.failed + ' item(s) as failed, not 1')
-const failures = Array.from(summary.failures)
-if (failures.length !== 1 || failures[0].id !== GONE) {
-  fail('the run blamed the wrong item(s): ' + JSON.stringify(failures.map((failure) => failure.id)))
+const companionStatus = await api('/api/dsh-reclaim/companion-status')
+if (companionStatus.status !== 200 || companionStatus.body?.ok !== true) {
+  fail('/companion-status route failed: ' + JSON.stringify(companionStatus.body))
 }
-if (!Array.from(failures[0].codes).includes('session-dir-not-found')) {
-  fail('the failure carries the wrong code: ' + JSON.stringify(Array.from(failures[0].codes)))
+if (companionStatus.body?.active !== true) {
+  fail('companion mode is not reported as active')
 }
-console.log('   the panel says: moved 0, already quarantined 8, failed 1 (' + GONE + ')')
+console.log('   companion     : status route ok, upstream=' + companionStatus.body.upstream)
 
-const unavailable = seam.unavailableFromRun(summary)
-for (const id of MOVED) {
-  if (unavailable.get(id) !== 'row.inQuarantine') {
-    fail(id + ' is not marked as already quarantined: ' + JSON.stringify(unavailable.get(id)))
-  }
-}
-if (unavailable.get(GONE) !== 'row.sourceGone') {
-  fail('the ninth session is not marked as source-gone: ' + JSON.stringify(unavailable.get(GONE)))
-}
-
-// A report carrying the nine sessions as the server grades them: safe and batch-clearable,
-// which is exactly what they were when they were submitted the first time.
-const report = {
+// Verify panel tree renders companion banner
+const noop = () => {}
+const dummyReport = {
   ok: true,
   scanCount: 1,
   gate: {},
   families: [],
   totals: { totalReclaimableBytes: 0, sessionCount: 9, dedupAttachmentCount: 0 },
   tiers: {
-    sessions: {
-      safe: IDS.map((id) => ({
-        kind: 'session',
-        id,
-        tier: 'safe',
-        tierReasons: [],
-        blockingChecks: [],
-        selectable: true,
-        batchClearable: true,
-        dedupCount: 0,
-        freedByDeletingBytes: 4096,
-        freedBreakdown: {},
-        facts: {
-          title: 'a session from the #18 report',
-          archived: false,
-          sizeBytes: 4096,
-          lastActivity: '2026-01-01T00:00:00.000Z',
-          ageDays: 41,
-          workspacePath: '/home/Projects/demo',
-          sessionIds: [],
-        },
-      })),
-      confirm: [],
-      danger: [],
-      unclassified: [],
-    },
+    sessions: { safe: [], confirm: [], danger: [], unclassified: [] },
     attachments: { safe: [], confirm: [], danger: [], unclassified: [] },
     caches: { safe: [], confirm: [], danger: [], unclassified: [], reportOnly: [] },
   },
 }
-
-const selectable = Array.from(seam.selectableSafeIds(report, unavailable))
-if (selectable.length !== 0) {
-  fail('the panel would still offer these rows for a bulk action: ' + JSON.stringify(selectable))
-}
-
-// --- 6. and what it says, in the words a user reads ------------------------
-const noop = () => {}
 const tree = seam.renderPanel(
   react,
   {
@@ -260,16 +193,16 @@ const tree = seam.renderPanel(
     locale: 'zh',
     status: 'ready',
     error: null,
-    report,
+    report: dummyReport,
     trash: null,
     thresholdDays: 30,
     view: 'audit',
     selected: new Set(),
     busy: null,
     notice: null,
-    run: summary,
+    run: null,
     receipts: [],
-    unavailable,
+    unavailable: new Map(),
     reviewOpen: new Set(),
     collapsed: new Set(),
     openTiers: new Set(['safe']),
@@ -294,7 +227,6 @@ const tree = seam.renderPanel(
   },
 )
 
-/** Every element in the tree, depth first. */
 function walk(node, out = []) {
   if (node === null || node === undefined || typeof node !== 'object') return out
   out.push(node)
@@ -302,59 +234,11 @@ function walk(node, out = []) {
   return out
 }
 
-/** The text content of an element, concatenated. */
-function textOf(node) {
-  if (typeof node === 'string') return node
-  if (node === null || node === undefined || typeof node !== 'object') return ''
-  return (node.children ?? []).map(textOf).join(' ')
-}
-
 const nodes = walk(tree)
-const runBar = nodes.find((node) => node.props?.['data-dshr-run'] !== undefined)
-if (runBar?.props?.['data-dshr-run'] !== '0:1:8') {
-  fail('the result bar reads ' + JSON.stringify(runBar?.props?.['data-dshr-run']) + ', not "0:1:8"')
+const companionCard = nodes.find((node) => node.props?.className?.includes('dshr-companion-card'))
+if (!companionCard) {
+  fail('companion banner was not rendered in the panel tree')
 }
-const announcer = nodes.find((node) => node.props?.['data-dshr-announcer'] !== undefined)
-const announced = textOf(announcer)
-if (announced !== '已隔离 0 项，失败 1 项，已在隔离区 8 项。') {
-  fail('the live region says "' + announced + '"')
-}
-const blamed = nodes.filter((node) => node.props?.['data-dshr-run-failure'] !== undefined)
-if (blamed.length !== 1 || blamed[0].props['data-dshr-run-failure'] !== GONE) {
-  fail('the result bar blames ' + JSON.stringify(blamed.map((node) => node.props['data-dshr-run-failure'])) + ', not the ninth')
-}
-for (const id of MOVED) {
-  const badge = nodes.find((node) => node.props?.['data-dshr-unavailable-badge'] === id)
-  if (badge === undefined || textOf(badge) !== '已在隔离区') {
-    fail(id + ' is not badged as already quarantined: ' + JSON.stringify(textOf(badge)))
-  }
-}
-const goneBadge = nodes.find((node) => node.props?.['data-dshr-unavailable-badge'] === GONE)
-if (goneBadge === undefined || textOf(goneBadge) !== '源目录不存在') {
-  fail('the ninth session is not badged as source-gone: ' + JSON.stringify(textOf(goneBadge)))
-}
-for (const id of IDS) {
-  const row = nodes.find((node) => node.props?.['data-dshr-row'] === id)
-  if (row === undefined) fail(id + ' is not on screen')
-  const control = walk(row).find((node) => node.type === 'input')
-  if (control?.props?.disabled !== true) {
-    fail(id + ' still offers a usable checkbox')
-  }
-}
-console.log('   live region   : ' + announced)
-console.log('   result bar    : ' + runBar.props['data-dshr-run'] + ' (moved:failed:already), one failure listed')
+console.log('   companion UI  : banner successfully rendered in panel header')
 
-// --- 7. and the quarantine itself agrees ------------------------------------
-const trash = await api('/api/dsh-reclaim/trash')
-const held = (trash.body?.batches ?? []).flatMap((batch) => batch.sessionIds ?? [])
-for (const id of MOVED) {
-  if (!held.includes(id)) {
-    fail('the quarantine listing does not mention ' + id + ': ' + JSON.stringify(held))
-  }
-}
-if (held.includes(GONE)) {
-  fail('the quarantine listing claims to hold the ninth session, which was deleted: ' + JSON.stringify(held))
-}
-console.log('   quarantine    : ' + held.length + ' session id(s) recorded across ' + trash.body.batches.length + ' batch(es)')
-
-console.log('PASS: a repeated quarantine of nine sessions reads as 8 already quarantined and 1 gone - not 9 failures.')
+console.log('PASS: session deletion safely delegated to upstream (ADR 0001) and companion status verified.')
