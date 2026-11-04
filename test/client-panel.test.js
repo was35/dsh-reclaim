@@ -34,6 +34,7 @@ const loaded = (() => {
   return {
     react,
     plugin,
+    formatBytes: seam.formatBytes,
     renderPanel: seam.renderPanel,
     classifyUrl: seam.classifyUrl,
     formatClock: seam.formatClock,
@@ -1301,4 +1302,62 @@ test('showCompanionToast mounts alert toast to document body on session removal 
   assert.equal(toast.attrs['data-dshr-toast'], 'session-removed')
   assert.ok(toast.children.some((c) => c.textContent && c.textContent.includes('会话已删除')))
 })
+
+test('formatBytes properly scales positive, zero, and negative byte counts with human-readable units', () => {
+  assert.equal(loaded.formatBytes(0), '0 B')
+  assert.equal(loaded.formatBytes(512), '512 B')
+  assert.equal(loaded.formatBytes(1024), '1.0 KB')
+  assert.equal(loaded.formatBytes(94310), '92.1 KB')
+  assert.equal(loaded.formatBytes(67528294), '64.4 MB')
+  assert.equal(loaded.formatBytes(2147483648), '2.00 GB')
+
+  // Negative values must be formatted with magnitude units, not unscaled raw byte strings
+  assert.equal(loaded.formatBytes(-500), '-500 B')
+  assert.equal(loaded.formatBytes(-1024), '-1.0 KB')
+  assert.equal(loaded.formatBytes(-67420420), '-64.3 MB')
+  assert.equal(loaded.formatBytes(-2684354560), '-2.50 GB')
+  assert.equal(loaded.formatBytes(NaN), '?')
+  assert.equal(loaded.formatBytes(null), '?')
+})
+
+test('top card metrics display total releasable bytes without negative red labels', () => {
+  const report = {
+    pending: false,
+    totals: {
+      totalReclaimableBytes: 94310, // ~92.1 KB
+      sessionCount: 154,
+      dedupAttachmentCount: 178,
+    },
+    families: new Array(100).fill({}),
+    scanCount: 4,
+    gate: {},
+  }
+  const trash = {
+    footprint: {
+      bytes: 67528294, // ~64.4 MB
+      batches: 2,
+    },
+  }
+
+  const tree = render(report, {
+    trash,
+    thresholdDays: 30,
+    view: 'audit',
+  })
+
+  const netNode = walk(tree).find((node) => node.props?.['data-dshr-net'] !== undefined)
+  assert.ok(netNode, 'top card must render net release node')
+  assert.equal(netNode.props.className, 'dshr-net-pos', 'net node must have positive styling, never error red')
+
+  // Total releasable = 94310 + 67528294 = 67622604 (~64.5 MB)
+  assert.equal(netNode.props['data-dshr-net'], '67622604')
+  assert.equal(textOf(netNode), '64.5 MB')
+
+  const topText = textOf(tree)
+  assert.match(topText, /92\.1 KB/)
+  assert.match(topText, /64\.4 MB/)
+  assert.match(topText, /彻底删除共可释放/)
+  assert.doesNotMatch(topText, /-67420420/)
+})
+
 
