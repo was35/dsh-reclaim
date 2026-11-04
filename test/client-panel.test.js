@@ -73,6 +73,7 @@ const loaded = (() => {
     rememberReceipt: panel.rememberReceipt,
     summarizeReceipts: panel.summarizeReceipts,
     selectableSafeIds: panel.selectableSafeIds,
+    selectableArtifactIds: panel.selectableArtifactIds,
   }
 })()
 
@@ -121,6 +122,11 @@ function render(report, overrides = {}, handlers = {}) {
       toggle: noop,
       toggleReview: noop,
       toggleGroup: noop,
+      toggleTier: noop,
+      toggleArtifactFold: noop,
+      selectSafe: noop,
+      selectSafeArtifacts: noop,
+      clearSelection: noop,
       setThresholdDays: noop,
       setView: noop,
       refresh: noop,
@@ -158,6 +164,17 @@ function reportWith({ caches = {}, attachments = {}, sessions = {} }) {
       caches: { safe: [], confirm: [], danger: [], unclassified: [], reportOnly: [], ...caches },
     },
   }
+}
+
+/**
+ * The folds that have to be open for one artifact row to be on screen.
+ *
+ * The clearables card folds by tier and then by kind, so a row is rendered only when both of
+ * its folds are open. Tests that are about a row open the folds that lead to it; tests that
+ * are about the folds leave them shut.
+ */
+function foldsOpen(tier, kind) {
+  return new Set(['tier:' + tier, 'kind:' + tier + ':' + kind])
 }
 
 /**
@@ -252,7 +269,9 @@ const DANGER_ATTACHMENT = {
 }
 
 test('a cache row the server graded clearable gets a usable checkbox', () => {
-  const tree = render(reportWith({ caches: { safe: [SAFE_FAMILY] } }))
+  const tree = render(reportWith({ caches: { safe: [SAFE_FAMILY] } }), {
+    openArtifacts: foldsOpen('safe', 'cache-family'),
+  })
   const row = rowById(tree, 'cache-family:request-images')
   assert.notEqual(row, null, 'the clearable cache family was not rendered at all')
   assert.equal(row.selectable, 'true')
@@ -263,7 +282,9 @@ test('a cache row the server graded clearable gets a usable checkbox', () => {
 })
 
 test('a cache row that could not be enumerated is listed, refused, and says why', () => {
-  const tree = render(reportWith({ caches: { unclassified: [BLOCKED_FAMILY] } }))
+  const tree = render(reportWith({ caches: { unclassified: [BLOCKED_FAMILY] } }), {
+    openArtifacts: foldsOpen('unclassified', 'cache-family'),
+  })
   const row = rowById(tree, 'cache-family:tmp')
   assert.notEqual(row, null, 'the blocked cache family was hidden instead of explained')
   assert.equal(row.selectable, 'false')
@@ -272,7 +293,9 @@ test('a cache row that could not be enumerated is listed, refused, and says why'
 })
 
 test('a report-only family is shown as reported, never as clearable', () => {
-  const tree = render(reportWith({ caches: { reportOnly: [REPORT_ONLY_FAMILY] } }))
+  const tree = render(reportWith({ caches: { reportOnly: [REPORT_ONLY_FAMILY] } }), {
+    openArtifacts: foldsOpen('reportOnly', 'report-only-family'),
+  })
   const row = rowById(tree, 'report-only:files')
   assert.notEqual(row, null)
   assert.equal(row.selectable, 'false')
@@ -280,7 +303,9 @@ test('a report-only family is shown as reported, never as clearable', () => {
 })
 
 test('an attachment still referenced by a session is never offered for clearing', () => {
-  const tree = render(reportWith({ attachments: { danger: [DANGER_ATTACHMENT] } }))
+  const tree = render(reportWith({ attachments: { danger: [DANGER_ATTACHMENT] } }), {
+    openArtifacts: foldsOpen('danger', 'attachment'),
+  })
   const row = rowById(tree, 'sha256-aaaa')
   assert.notEqual(row, null, 'the attachment was not rendered')
   assert.equal(row.selectable, 'false')
@@ -725,6 +750,19 @@ test('the copy in this bundle and the shared dictionary agree on the renamed act
     }
   }
 
+  // The whole `clear.*` family belongs to the clearables card, and it is long enough that a
+  // partial check would let half of it drift between the two copies.
+  const clearKeys = Object.keys(inline.zh).filter((key) => key.startsWith('clear.'))
+  assert.ok(clearKeys.length > 0, 'the inline dictionary has no clear.* keys to compare')
+  for (const key of clearKeys) {
+    for (const locale of ['zh', 'en']) {
+      const fromBundle = loaded.plugin.__messages.translatePanel(locale, key, params)
+      const fromShared = translatePanel(locale, key, params)
+      assert.notEqual(fromShared, key, `${locale}:${key} is missing from lib/messages.js`)
+      assert.equal(fromBundle, fromShared, `${locale}:${key} drifted between lib/client.js and lib/messages.js`)
+    }
+  }
+
   // And the retired words are not hiding in this copy either.
   const retired = ['彻底清空', '清理所选', '搬运中', '已搬走', '仍要清理']
   for (const key of Object.keys(inline.zh)) {
@@ -1031,5 +1069,118 @@ test('clear-selection is offered only while something is selected, and drops the
   // Clearing the selection does not touch the folds or the disclosures: those are about
   // reading the list, not about what the next action would move.
   assert.equal(buttonBy(some, 'data-dshr-select-safe').props.disabled, false)
+})
+
+// --- #28: the clearables card folds by tier and by kind ------------------------
+
+/** The fold control of one artifact tier, found by the attribute it carries. */
+function artifactTierToggle(tree, tier) {
+  return walk(tree).find((node) => node.props?.['data-dshr-artifact-tier-toggle'] === 'tier:' + tier) ?? null
+}
+
+/** The fold control of one artifact kind inside one tier. */
+function artifactKindToggle(tree, tier, kind) {
+  return walk(tree).find((node) => node.props?.['data-dshr-artifact-kind-toggle'] === 'kind:' + tier + ':' + kind) ?? null
+}
+
+test('the clearables card folds by tier and then by kind, and starts with only the safe tier open', () => {
+  const tree = render(reportWith({ caches: { safe: [SAFE_FAMILY], unclassified: [BLOCKED_FAMILY] } }))
+
+  // The safe tier opens because it is the tier the card can act on; the kind inside it starts
+  // folded, so the reader sees the inventory before the rows.
+  assert.equal(artifactTierToggle(tree, 'safe').props['aria-expanded'], true)
+  assert.equal(artifactKindToggle(tree, 'safe', 'cache-family').props['aria-expanded'], false)
+  assert.equal(rowById(tree, 'cache-family:request-images'), null, 'the kind fold did not hold its rows back')
+
+  // A tier the card cannot act on stays shut, and its header says why it is there at all.
+  assert.equal(artifactTierToggle(tree, 'unclassified').props['aria-expanded'], false)
+  assert.match(textOf(artifactTierToggle(tree, 'unclassified')), /读不到或说不清的都在这里/)
+})
+
+test('a folded artifact group still says how many rows and how many bytes it holds', () => {
+  const tree = render(reportWith({ caches: { safe: [SAFE_FAMILY] } }))
+  const tier = artifactTierToggle(tree, 'safe')
+  assert.match(textOf(tier), /1 项/)
+  assert.match(textOf(tier), /2\.0 KB/)
+  const kind = artifactKindToggle(tree, 'safe', 'cache-family')
+  assert.match(textOf(kind), /1 项/)
+  assert.match(textOf(kind), /可重建缓存族/)
+})
+
+test('a row whose size is unknown is counted as unknown, not as zero bytes', () => {
+  const unknown = { ...SAFE_FAMILY, id: 'cache-family:unknown', bytes: undefined }
+  const tree = render(reportWith({ caches: { safe: [SAFE_FAMILY, unknown] } }))
+  assert.match(textOf(artifactKindToggle(tree, 'safe', 'cache-family')), /另有 1 项大小未知/)
+})
+
+test('a row the card cannot act on is behind a fold too, and refuses exactly what it refused before', () => {
+  const tree = render(reportWith({ attachments: { danger: [DANGER_ATTACHMENT] } }), {
+    openArtifacts: foldsOpen('danger', 'attachment'),
+  })
+  const row = rowById(tree, 'sha256-aaaa')
+  assert.notEqual(row, null, 'the attachment was not rendered')
+  assert.equal(row.selectable, 'false')
+  assert.equal(row.disabled, true)
+  assert.match(row.text, /仍被会话引用/)
+})
+
+test('the fold state is the input\'s, so a reload cannot silently reopen what the reader shut', () => {
+  const report = reportWith({ caches: { safe: [SAFE_FAMILY] } })
+  const open = render(report, { openArtifacts: foldsOpen('safe', 'cache-family') })
+  assert.notEqual(rowById(open, 'cache-family:request-images'), null, 'an opened fold rendered no rows')
+
+  const shut = render(report, { openArtifacts: new Set(['tier:safe']) })
+  assert.equal(rowById(shut, 'cache-family:request-images'), null)
+  assert.equal(artifactKindToggle(shut, 'safe', 'cache-family').props['aria-expanded'], false)
+})
+
+test('clicking an artifact fold asks the panel to toggle exactly that fold', () => {
+  const seen = []
+  const tree = render(reportWith({ caches: { safe: [SAFE_FAMILY] } }), {}, {
+    toggleArtifactFold: (key) => seen.push(key),
+  })
+  artifactTierToggle(tree, 'safe').props.onClick()
+  artifactKindToggle(tree, 'safe', 'cache-family').props.onClick()
+  assert.deepEqual(seen, ['tier:safe', 'kind:safe:cache-family'])
+})
+
+test('the card offers select-all for the artifacts a single click could take, and only those', () => {
+  const report = reportWith({
+    caches: { safe: [SAFE_FAMILY], unclassified: [BLOCKED_FAMILY] },
+    attachments: { danger: [DANGER_ATTACHMENT] },
+  })
+  // The grey rows are not offered: the bulk control and the row's own checkbox read the same
+  // predicate, so a bulk tick can never select a row a single click would refuse.
+  assert.deepEqual(Array.from(loaded.selectableArtifactIds(report)), ['cache-family:request-images'])
+
+  let pressed = 0
+  const tree = render(report, {}, { selectSafeArtifacts: () => { pressed += 1 } })
+  const button = buttonBy(tree, 'data-dshr-select-safe-artifacts')
+  assert.notEqual(button, null, 'the artifact select-all control is missing from the card')
+  assert.equal(button.props.disabled, false)
+  assert.equal(textOf(button), '全选安全产物（1）')
+  button.props.onClick()
+  assert.equal(pressed, 1)
+
+  // Nothing safe to add: the control says so instead of inviting a click that does nothing.
+  const none = render(reportWith({ caches: { unclassified: [BLOCKED_FAMILY] } }), {}, {})
+  const empty = buttonBy(none, 'data-dshr-select-safe-artifacts')
+  assert.equal(empty.props.disabled, true)
+  assert.equal(textOf(empty), '全选安全产物（0）')
+
+  // A run in flight: the control is off the table.
+  const busy = render(report, { busy: 'clean' }, {})
+  assert.equal(buttonBy(busy, 'data-dshr-select-safe-artifacts').props.disabled, true)
+})
+
+test('the artifact select-all and the session select-all are two controls, not one', () => {
+  const report = reportWith({ sessions: { safe: [tierRow('s-a', 'safe')] }, caches: { safe: [SAFE_FAMILY] } })
+  const tree = render(report, {}, {})
+  assert.notEqual(buttonBy(tree, 'data-dshr-select-safe'), null)
+  assert.notEqual(buttonBy(tree, 'data-dshr-select-safe-artifacts'), null)
+  // They act on different rows and leave their receipts in different places, so their labels
+  // say which is which.
+  assert.equal(textOf(buttonBy(tree, 'data-dshr-select-safe')), '全选安全项（1）')
+  assert.equal(textOf(buttonBy(tree, 'data-dshr-select-safe-artifacts')), '全选安全产物（1）')
 })
 
