@@ -45,6 +45,7 @@ const loaded = (() => {
     unavailableFromRun: seam.unavailableFromRun,
     selectableSafeIds: seam.selectableSafeIds,
     selectableArtifactIds: seam.selectableArtifactIds,
+    selectableAttachmentIds: seam.selectableAttachmentIds,
     setupCompanionNotification: seam.setupCompanionNotification,
     showCompanionToast: seam.showCompanionToast,
   }
@@ -239,6 +240,19 @@ const DANGER_ATTACHMENT = {
   batchClearable: false,
   facts: { paths: ['/home/.dsh/attachments/v1/objects/aa/bb'], bytes: 4096, sessionIds: ['s-1'] },
   bytes: 4096,
+}
+
+const SAFE_ATTACHMENT = {
+  kind: 'attachment',
+  id: 'sha256-safe-attach',
+  tier: 'safe',
+  tierReasons: [],
+  blockingChecks: [],
+  checks: [{ ok: true, code: 'zero-references-proven', message: 'safe orphan', detail: null }],
+  selectable: true,
+  batchClearable: true,
+  facts: { paths: ['/home/.dsh/attachments/v1/objects/aa/safe'], bytes: 2048, sessionIds: [] },
+  bytes: 2048,
 }
 
 test('a cache row the server graded clearable gets a usable checkbox', () => {
@@ -1238,6 +1252,58 @@ test('the artifact select-all and the session select-all are two controls, not o
   // say which is which.
   assert.equal(textOf(buttonBy(tree, 'data-dshr-select-safe')), '全选安全项（1）')
   assert.equal(textOf(buttonBy(tree, 'data-dshr-select-safe-artifacts')), '全选安全产物（1）')
+})
+
+test('safe attachment objects can be selected independently from cache families', () => {
+  const report = reportWith({
+    caches: { safe: [SAFE_FAMILY] },
+    attachments: { safe: [SAFE_ATTACHMENT], danger: [DANGER_ATTACHMENT] },
+  })
+
+  // selectableAttachmentIds picks only safe attachments, not danger attachments or cache families
+  assert.deepEqual(Array.from(loaded.selectableAttachmentIds(report)), ['sha256-safe-attach'])
+
+  let pressed = 0
+  const tree = render(report, {}, { selectSafeAttachments: () => { pressed += 1 } })
+  const button = buttonBy(tree, 'data-dshr-select-safe-attachments')
+  assert.notEqual(button, null, 'the safe attachment select control is missing from the card head')
+  assert.equal(button.props.disabled, false)
+  assert.equal(textOf(button), '全选安全附件（1）')
+  button.props.onClick()
+  assert.equal(pressed, 1)
+
+  // When no safe attachments exist, the button is disabled and reads (0)
+  const noAttachments = render(reportWith({ caches: { safe: [SAFE_FAMILY] } }), {}, {})
+  const emptyBtn = buttonBy(noAttachments, 'data-dshr-select-safe-attachments')
+  assert.equal(emptyBtn.props.disabled, true)
+  assert.equal(textOf(emptyBtn), '全选安全附件（0）')
+})
+
+test('kind group headers render a group-level select button when safe items are present', () => {
+  const report = reportWith({
+    attachments: { safe: [SAFE_ATTACHMENT] },
+  })
+  let toggled = null
+  const tree = render(
+    report,
+    { openArtifacts: foldsOpen('safe', 'attachment') },
+    { toggleArtifactKindSelection: (ids) => { toggled = ids } },
+  )
+
+  const groupBtn = buttonBy(tree, 'data-dshr-select-artifact-kind')
+  assert.notEqual(groupBtn, null, 'the group select button is missing from the kind header')
+  assert.equal(textOf(groupBtn), '全选安全附件（1）')
+  groupBtn.props.onClick()
+  assert.deepEqual(Array.from(toggled), ['sha256-safe-attach'])
+
+  // When all items in the group are already selected, button text switches to deselect
+  const selectedTree = render(
+    report,
+    { openArtifacts: foldsOpen('safe', 'attachment'), selected: new Set(['sha256-safe-attach']) },
+    {},
+  )
+  const deselectBtn = buttonBy(selectedTree, 'data-dshr-select-artifact-kind')
+  assert.equal(textOf(deselectBtn), '取消全选')
 })
 
 test('showCompanionToast mounts alert toast to document body on session removal signal', () => {

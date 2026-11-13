@@ -8,6 +8,11 @@
 
 ### Added
 
+- **支持单独一键全选/勾选安全附件对象与按类别勾选产物。**
+  - 在「可重建产物与附件」卡头增加「全选安全附件（N）」（`data-dshr-select-safe-attachments`）快捷控件，与「全选安全产物」并列，专门过滤并只勾选当前 `tier === 'safe'` 且 `batchClearable === true` 的附件对象，避免连同可重建缓存族（整目录）一同选入导致搬迁时触发 `nested-selection` 路径嵌套拒绝。
+  - 在类别折叠头部（`renderKindGroup`）引入组级别勾选按钮（`data-dshr-select-artifact-kind`），当该类目存在安全可勾选项时，支持一键单独全选/取消全选该组项（例如在「附件对象」组头上显示「全选安全附件（N）/ 取消全选」）。
+  - 同步补充中英文字典键（`clear.selectSafeAttachments`、`clear.selectGroup`、`clear.deselectGroup`），并通过 `PANEL_KEY_PARITY` 与单源一致性断言。新增 2 条面板断言，测试从 139 条扩展至 141 条全绿。
+
 - **支持普通文件附件（`files` / `file-objects`）与孤儿附件清理与恢复。**
   - 解除了 `files` 与 `file-objects` 的 `REPORT_ONLY_FAMILIES` 限制，两族正式接入附件引用图谱与批量清理流水线。
   - `indexAttachmentsOnDisk` 升级支持 2 级（`file-objects/<shard>/<hash>`、`objects/<shard>/<hash>`）与 3 级（`files/<shard>/<hash>/<name>`）路径，按 content id 聚合同一附件的所有实体与硬链接，并在卡片上呈现原始文件名与真实物理大小（避免重复计算硬链接字节）。
