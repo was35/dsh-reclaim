@@ -50,6 +50,11 @@ const SAMPLE_PARAMS = {
   files: 7,
   restored: 2,
   blocked: 0,
+  selected: 1,
+  reclaimPct: '60',
+  quarantinePct: '40',
+  outer: 'request-images',
+  inner: 'sample.png',
 }
 
 const LOCALES = ['zh', 'en']

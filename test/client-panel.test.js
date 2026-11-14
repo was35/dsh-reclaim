@@ -1306,6 +1306,85 @@ test('kind group headers render a group-level select button when safe items are 
   assert.equal(textOf(deselectBtn), '取消全选')
 })
 
+test('clearables card renders before session audit card in companion mode', () => {
+  const report = reportWith({
+    sessions: { safe: [tierRow('s-1', 'safe')] },
+    caches: { safe: [SAFE_FAMILY] },
+  })
+  const tree = render(report, {}, {})
+  const clearableCard = walk(tree).find((node) => node.props?.['data-dshr-clearables'] === 'true')
+  const sessionAuditCard = walk(tree).find((node) => node.props?.['data-dshr-session-audit'] === 'true')
+  assert.notEqual(clearableCard, undefined, 'clearables card is missing')
+  assert.notEqual(sessionAuditCard, undefined, 'session audit card is missing')
+
+  // In the DOM walk, clearableCard appears earlier than sessionAuditCard
+  const allNodes = walk(tree)
+  const clearableIndex = allNodes.indexOf(clearableCard)
+  const auditIndex = allNodes.indexOf(sessionAuditCard)
+  assert.ok(clearableIndex < auditIndex, 'clearables card must precede session audit card')
+
+  // Session audit card contains the threshold dial
+  const thresholdBtns = walk(sessionAuditCard).filter((node) => node.props?.['data-dshr-threshold'] !== undefined)
+  assert.equal(thresholdBtns.length, 4, 'threshold buttons belong inside the session audit card')
+})
+
+test('top metrics renders capacity ratio gauge and segmented tabs', () => {
+  const report = reportWith({
+    sessions: { safe: [tierRow('s-1', 'safe')] },
+    caches: { safe: [SAFE_FAMILY] },
+  })
+  let navigated = null
+  const tree = render(report, { view: 'audit' }, { setView: (v) => { navigated = v } })
+
+  // Capacity gauge exists
+  const gauge = walk(tree).find((node) => node.props?.['data-dshr-gauge'] === 'true')
+  assert.notEqual(gauge, undefined, 'capacity gauge is missing from the top card')
+
+  // Segmented tab controls exist and navigate
+  const auditTab = walk(tree).find((node) => node.props?.['data-dshr-tab'] === 'audit')
+  const binTab = walk(tree).find((node) => node.props?.['data-dshr-tab'] === 'bin')
+  assert.notEqual(auditTab, undefined, 'audit tab is missing')
+  assert.notEqual(binTab, undefined, 'bin tab is missing')
+  assert.equal(auditTab.props['aria-selected'], true)
+  assert.equal(binTab.props['aria-selected'], false)
+
+  binTab.props.onClick()
+  assert.equal(navigated, 'bin')
+})
+
+test('kind group header shows selected count ratio when items are checked', () => {
+  const report = reportWith({
+    attachments: { safe: [SAFE_ATTACHMENT] },
+  })
+  const tree = render(
+    report,
+    { openArtifacts: foldsOpen('safe', 'attachment'), selected: new Set(['sha256-safe-attach']) },
+    {},
+  )
+  const kindGroup = walk(tree).find((node) => node.props?.['data-dshr-artifact-kind'] === 'safe:attachment')
+  assert.notEqual(kindGroup, undefined)
+  const metaSpan = walk(kindGroup).find((node) => node.props?.className === 'dshr-group-meta')
+  assert.notEqual(metaSpan, undefined)
+  assert.match(textOf(metaSpan), /已选 1 \/ 1 项/)
+})
+
+test('notice card renders formatted error and handles nested conflict without raw null', () => {
+  const tree = render(
+    reportWith({}),
+    {
+      notice: {
+        kind: 'warn',
+        text: '没有隔离任何东西：路径嵌套冲突：所选目录【request-images】包含内部文件【image.png】，两者不能同时搬运，请仅勾选其中一项。',
+      },
+    },
+    {},
+  )
+  const noticeNode = walk(tree).find((node) => node.props?.className?.includes('dshr-error'))
+  assert.notEqual(noticeNode, undefined)
+  assert.match(textOf(noticeNode), /路径嵌套冲突/)
+  assert.doesNotMatch(textOf(noticeNode), /null/)
+})
+
 test('showCompanionToast mounts alert toast to document body on session removal signal', () => {
   // Simulate DOM document
   const createdElements = []
